@@ -298,10 +298,6 @@ def read_person_trip_list(path):
                                             minutes=st_time[j].tm_min,seconds=st_time[j].tm_sec)  #:::TIME:::
             persons[p_id] = [(o_taz,st_time[0]),(d_taz,st_time[1]),mode,target,purpose,vot]
 
-
-
-
-
 def filter_trips(trips,dep_time='08:00:00',dep_window='00:05:00'):
     raw_time = dep_time.rsplit(':')
     if int(raw_time[0]) > 23:
