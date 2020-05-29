@@ -1,0 +1,2 @@
+agency_phone,agency_url,agency_id,agency_name,agency_timezone,agency_lang
+860-525-9181,http://www.cttransit.com,,CTTransit- Hartford,America/New_York,en
