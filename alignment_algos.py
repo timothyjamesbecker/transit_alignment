@@ -137,7 +137,7 @@ def affine_sim(c1,c2,w=[0,1,1,0.9,0.05]):#match,miss,gap,space,scale
             C[j] = min(I,D[j],M)
     return [u-C[u],u]
 
-def edit_sim(c1,c2,w=[0,1,1,1]): #[m,d,i,s]
+def edit_sim(c1,c2,w=[0,1,1]): #[m,d,i,s]
     u,v,k = len(c1),len(c2),2
     if u<v: u,v,c1,c2 = v,u,c2,c1
     D = np.zeros((u+1,k),dtype=int)
@@ -171,6 +171,28 @@ def lcs(c1,c2,w=[1,0,0]):
             else:                                 #delete
                 D[i%k][j] = D[(i-1)%k][j]+w[2]    #top
     return [D[u%k][v],u]
+
+def pairwise_lcs_dict(S,dist,lim=0.5,w=[1.0,0.0,0.0],pos=0): #w=[match,extend,delete]
+    idx = list(sorted(S.keys()))
+    n,l,z,k = len(S),max([len(S[i]) for i in S]),1,2
+    L = np.zeros((n,n,2),dtype=np.float32)
+    D = np.zeros((k,l+1),dtype=np.float32)   #two of the longest seq
+    for x in range(n):
+        u = len(S[idx[x]])
+        for y in range(z,n,1):
+            v = len(S[idx[y]])
+            D[:] = 0.0
+            for i in range(1,u+1):      #rows--------------
+                d1 = S[idx[x]][i-1,pos]
+                for j in range(1,v+1):  #columns-----------
+                    d2 = S[idx[y]][j-1,pos]
+                    if dist[d1][d2]<=lim:              D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[d1][d2]/lim)
+                    elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
+                    else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
+            L[x][y] = L[x][y] = [D[u%k][v],u*w[0]]
+        L[x][x] = [u*w[0],u*w[0]]
+        z += 1
+    return L
 
 def jaccard_sim(c1,c2):
     C1,C2 = set(c1),set(c2)
@@ -239,7 +261,7 @@ def gtfs_stop_time_shape_dist(n_path,s_idx):
                     k = (min(trips[t][i][0],trips[t][j][0]),max(trips[t][i][0],trips[t][j][0]))
                     if k in E: E[k] += [abs(trips[t][i][2]-trips[t][j][2])]
                     else:      E[k]  = [abs(trips[t][i][2]-trips[t][j][2])]
-    for k in E: E[k] = np.min(E[k])
+    for k in E: E[k] = np.float32(np.min(E[k]))
     stop = time.time()
     print('calculated %s exact shape distance pairs in %s sec'%(len(E),round(stop-start,2)))
     return E
@@ -286,7 +308,7 @@ def read_gtfs_trips(n_base):
 #has time conversions inside and can aply calendar
 #needs to have calendar.txt, trips.txt and select the day Mo,Tu,We,Th,Fr,Sa,Su
 #stops = [[sid,sname,lon,lat,NN=[]],...[]]
-def read_gtfs_stop_times(n_base,s_idx,trips,t_idx,calendar,search_date):
+def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,search_date,search_time=[0,115200]):
     if type(search_date) is str: #search_date.weekday() = 0 => monday
         for t in ['%m/%d/%Y','%m-%d-%Y','%Y/%m/%d','%Y-%m-%d']:
             try: search_date = datetime.datetime.strptime(search_date,t)
@@ -304,7 +326,7 @@ def read_gtfs_stop_times(n_base,s_idx,trips,t_idx,calendar,search_date):
         header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
         c_idx = {header[i]:i for i in range(len(header))}
         data = [row.rsplit(',') for row in raw[1:]]
-        times = {}
+        seqs = {}
         for i in range(len(data)):
             trip_id = int(data[i][c_idx['trip_id']])
             trip = trips[t_idx[trip_id]]  #trips=[trip_id,trip_name,route_id,service_id,direction]
@@ -324,64 +346,107 @@ def read_gtfs_stop_times(n_base,s_idx,trips,t_idx,calendar,search_date):
                 # st_time = int(w if r<=30.0 else w+1)
                 st_time = int(st_time.total_seconds())
                 stop_id = int(data[i][c_idx['stop_id']].split('_merged_')[0]) #stop_id
-                if t_idx[trip_id] in times: times[t_idx[trip_id]] += [[s_idx[stop_id],st_time]]
-                else:                       times[t_idx[trip_id]]  = [[s_idx[stop_id],st_time]]
-        #stop_graph--------------------------------------------------------------------------------------
-        G = {}
-        for tid in times: #trip times have to have at least two stops
-            times[tid] = sorted(times[tid],key=lambda x: x[1])
-            if len(times[tid])==2:
-                if times[tid][1][0] in G: G[times[tid][1][0]]['in']  += [[times[tid][0][0],times[tid][1][1],tid,0]]
-                else:                     G[times[tid][1][0]] = {'in':[[times[tid][0][0],times[tid][1][1],tid,0]],'out':[]}
-                if times[tid][0][0] in G: G[times[tid][0][0]]['out'] += [[times[tid][1][0],times[tid][0][1],tid,1]]
-                else:                     G[times[tid][0][0]] = {'out':[[times[tid][1][0],times[tid][0][1]],tid,1],'in':[]}
-            elif len(times[tid])>2:
-                if times[tid][0][0] in G: G[times[tid][0][0]]['out'] += [[times[tid][1][0],times[tid][0][1],tid,1]]
-                else:                     G[times[tid][0][0]] = {'out':[[times[tid][1][0],times[tid][0][1],tid,1]],'in':[]}
-                for i in range(1,len(times[tid])-1,1):
-                    if times[tid][i][0] in G: G[times[tid][i][0]]['in']  += [[times[tid][i-1][0],times[tid][i][1],tid,i-1]]
-                    else:                     G[times[tid][i][0]] = {'in':[[times[tid][i-1][0],times[tid][i][1],tid,i-1]],'out':[]}
-                    G[times[tid][i][0]]['out'] += [[times[tid][i+1][0],times[tid][i][1],tid,i+1]]
-                if times[tid][i+1][0] in G: G[times[tid][i+1][0]]['in']  += [[times[tid][i][0],times[tid][i+1][1],tid,i]]
-                else:                       G[times[tid][i+1][0]] = {'in':[[times[tid][i][0],times[tid][i+1][1],tid,i]],'out':[]}
-        #now use a dict to bin each hour (24hours*60minutes*60seconds)
-        for sid in G:
-            for d in ['in','out']:
-                if len(G[sid][d])>0:
-                    G[sid][d] = sorted([[y[0],y[1],y[2],y[3]] for y in set([(x[0],x[1],x[2],x[3]) for x in G[sid][d]])],key=lambda f: (f[1],f[0]))
-                    hm = {}
-                    for i in range(32):
-                        hm[i] = {}
-                        for j in range(60): hm[i][j] = []
-                    for i in range(len(G[sid][d])):
-                        hr,mn = G[sid][d][i][1]//(3600),G[sid][d][i][1]%(3600)//60
-                        hm[hr][mn] += [G[sid][d][i]]
-                    G[sid][d] = hm
-        for sid in G:
-            for d in ['in','out']:
-                for hr in G[sid][d]:
-                    for mn in G[sid][d][hr]:
-                        G[sid][d][hr][mn] = sorted(G[sid][d][hr][mn],key=lambda x: (x[1],x[0]))
-        #stop graph-------------------------------------------------------------------------------------------------------
-        for t in times:
-            times[t] = np.asarray(sorted(times[t],key=lambda x: x[1])) #time sorted
-    return times,G
+                if t_idx[trip_id] in seqs: seqs[t_idx[trip_id]] += [[s_idx[stop_id],st_time,-1,-1]]
+                else:                      seqs[t_idx[trip_id]]  = [[s_idx[stop_id],st_time,-1,-1]]
+        for t in seqs: seqs[t] = sorted(seqs[t],key=lambda x: (x[1],x[0]))
+        seqs,G = filter_seqs(seqs,time_window=search_time) #up to 32 hours => 8am the next day = 115200
+    return seqs,G
+
+#given seqs and time window in elapsed seconds, filter out some seqs and reindex the result
+#:::TO DO: can add spatial filters via circles and rectangular bounding boxes :::
+def filter_seqs(seqs,time_window=[0,115200]):
+    S = copy.deepcopy(seqs)
+    if type(time_window[0]) is str:
+        for t in ['%H:%M:%S','%H:%M','%H']: #try hours:minutes:seconds, then hours:minutes, then hours
+            passed = False
+            try:
+                st_time = time.strptime(time_window[0],t)
+                time_window[0] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
+                time_window[0] = np.int32(time_window[0].total_seconds())
+                st_time = time.strptime(time_window[1],t)
+                time_window[1] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
+                time_window[1] = np.int32(time_window[1].total_seconds())
+                time_window = sorted(time_window)
+                passed = True
+            except Exception as E: pass
+            if passed: break
+    for t in S:
+        teqs = []
+        if type(S[t]) is not list: S[t] = S[t].tolist()
+        for i in range(len(S[t])):
+            if S[t][i][1]>=time_window[0] and S[t][i][1]<time_window[1]:
+                teqs += [S[t][i]]
+        S[t] = teqs
+    sk = list(S.keys())
+    for k in sk:
+        if len(S[k])<=1: S.pop(k)
+    #stop_graph--------------------------------------------------------------------------------------
+    G = {}
+    for tid in S: #trip S have to have at least two stops
+        if len(S[tid])==2:
+            if S[tid][1][0] in G:     G[S[tid][1][0]]['in']  += [[S[tid][0][0],S[tid][1][1],tid,0]]
+            else:                     G[S[tid][1][0]] =   {'in':[[S[tid][0][0],S[tid][1][1],tid,0]],'out':[]}
+            if S[tid][0][0] in G:     G[S[tid][0][0]]['out'] += [[S[tid][1][0],S[tid][0][1],tid,1]]
+            else:                     G[S[tid][0][0]] =  {'out':[[S[tid][1][0],S[tid][0][1],tid,1]],'in':[]}
+        elif len(S[tid])>2:
+            if S[tid][0][0] in G:     G[S[tid][0][0]]['out'] += [[S[tid][1][0],S[tid][0][1],tid,1]]
+            else:                     G[S[tid][0][0]] =  {'out':[[S[tid][1][0],S[tid][0][1],tid,1]],'in':[]}
+            for i in range(1,len(S[tid])-1,1):
+                if S[tid][i][0] in G: G[S[tid][i][0]]['in']  += [[S[tid][i-1][0],S[tid][i][1],tid,i-1]]
+                else:                 G[S[tid][i][0]] =   {'in':[[S[tid][i-1][0],S[tid][i][1],tid,i-1]],'out':[]}
+                G[S[tid][i][0]]['out'] +=                       [[S[tid][i+1][0],S[tid][i][1],tid,i+1]]
+            if S[tid][i+1][0] in G:   G[S[tid][i+1][0]]['in']+= [[S[tid][i][0],S[tid][i+1][1],tid,i]]
+            else:                     G[S[tid][i+1][0]] = {'in':[[S[tid][i][0],S[tid][i+1][1],tid,i]],'out':[]}
+    for sid in G:
+        for d in ['in','out']:
+            if len(G[sid][d])>0:
+                G[sid][d] = np.array(sorted(G[sid][d],key=lambda x: (x[1],x[0])),dtype=np.int32)
+        for i in range(len(G[sid]['in'])):
+            tid,idx = G[sid]['in'][i][2],G[sid]['in'][i][3]
+            S[tid][idx][2] = i
+        for i in range(len(G[sid]['out'])):
+            tid,idx = G[sid]['out'][i][2],G[sid]['out'][i][3]
+            S[tid][idx][3] = i
+    for t in S: S[t] = np.array(S[t],dtype=np.int32)
+    #data check----------------------------------------------------------------------------------------------------------
+    ends,clipped = [],0 #check to see how may trips have been trimmed/clipped by the time_window
+    for t in S:
+        if list(S[t][:,3]).count(-1)<=1 and list(S[t][:,3]).count(-1)<=1: #zero or one in/out link missing (start/end)
+            if not (S[t][-1][2]==-1 and S[t][0][3]==-1):
+                clipped += 1
+            ends += [True]
+        else:
+            ends += [False]
+    print('%s seqs have consistant-links=%s with %s clipped terminals'%(len(S),all(ends),clipped))
+    return S,G
+
+def seqs_to_ndarray(seqs):
+    sk = sorted(list(seqs.keys()))
+    idx = {sk[i]:i for i in range(len(sk))}
+    max_len = max([len(seqs[k]) for k in seqs])
+    D,L = np.zeros((len(seqs),max_len,4),dtype=np.int32),[]
+    for i in range(len(sk)):
+        n = len(seqs[sk[i]])
+        for j in range(n): D[i,:n,:] = seqs[sk[i]][:]
+        L += [n]
+    return D,L,idx
 
 #from fast trips data analysis---------------------------------------------------
 
 #will give taz to stop_id associated distances in m (walk_access_ft dist is in km)
 #walk buff is in meters => 800 ~0.5 miles
-def read_walk_access(path,walk_buff=800,val_sym=True,flat_sym=True):
+def read_walk_access(n_path,s_idx,walk_buff=0.5,walk_conv=1.0):
     header, data = [], []
-    with open(path, 'r') as f:
+    with open(n_path+'walk_access.txt', 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     data = [row.rsplit(',') for row in raw[1:]]
+    c_idx = {header[i]:i for i in range(len(header))}
 
     walk,short,filt = {},0,0
     for i in range(len(data)):
-        taz,stop_id,dir = int(data[i][0]),int(data[i][1]),(1 if data[i][2]=='access' else 0) #1 for on 0 for off
-        dist = float(data[i][3])*1000; #km to m
+        taz,stop_id,dir = int(data[i][0]),int(data[i][1].split('_merged_')[0]),(1 if data[i][2]=='access' else 0)
+        dist = float(data[i][3])*walk_conv; #miles
         if dist<=walk_buff: #will trim long walks...
             if taz in walk:
                 if stop_id in walk[taz]: walk[taz][stop_id][dir] = dist
@@ -389,49 +454,70 @@ def read_walk_access(path,walk_buff=800,val_sym=True,flat_sym=True):
             else:                        walk[taz] = {stop_id:{dir:dist}}
             short+=1
         else: filt+=1
-    print('%s out of %s taz-stop pairs were beyond the %sm walk buffer and were filtered'%(filt,filt+short,walk_buff))
-    if val_sym: #will check to see that all stops have access/egress the same
-        s,d = 0,0
-        for k in walk:
-            for s in walk[k]:
-                if len(walk[k][s])<2: d+=1
-                elif walk[k][s][0]!=walk[k][s][1]: d+=1
-                else: s+=1
-        if d<=0: print('all %s remaining stop_id(s) are symetric for walk access'%s)
-        else:    print('%s stops out of %s remaining stop_id(s) are asymetric for walk access'%(d,d+s))
-        if d<=0 and flat_sym:
-            flat = {}
-            for k in walk:
-                flat[k] = {}
-                for s in walk[k]:
-                    flat[k][s] = walk[k][s][0]
-            walk = flat
-    return walk
+    print('%s out of %s taz-stop pairs were beyond the %s mi walk buffer and were filtered'%(filt,filt+short,walk_buff))
+    D = {}
+    for taz in walk:
+        for sid in walk[taz]:
+            if taz in D:        D[taz][s_idx[sid]] = np.float32(walk[taz][sid][1])
+            else:               D[taz] = {s_idx[sid]:np.float32(walk[taz][sid][1])} #access=1
+            if s_idx[sid] in D: D[s_idx[sid]][taz] = np.float32(walk[taz][sid][0])
+            else:               D[s_idx[sid]] = {taz:np.float32(walk[taz][sid][0])} #egress=0
+    return D
 
-def read_person_trip_list(path):
-    path = d_base+'trip_list.txt'
-    header, data = [], []
-    with open(path, 'r') as f:
-        raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
-    header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
-    data = [row.rsplit(',') for row in raw[1:]]
-
-    persons = {}
+def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want to play around with demand files : IE dynamic...
+    header,data = [],[]
+    with open(path,'r') as f:
+        raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
+    header = [f for f in raw[0].rsplit(delim)]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
+    c_idx = {header[i]:i for i in range(len(header))}
+    data,j = [],0
+    for row in raw[1:]:
+        quotes = row.count(quoting)//2
+        if quotes<1: data += [row.split(',')]
+        else:        #some variable amount of quoting
+            sect,t,sub = [],[],row
+            for i in range(quotes):
+                start = sub.find(quoting)
+                end   = sub[start+1:].find(quoting)+1
+                if start>0: sect += [sub[:start-1],sub[start:start+end+1]]
+                else:       sect += [sub[start:start+end+1]]
+                sub = sub[start+end+2:]
+            sect += [sub]
+            for s in sect:
+                if not s.startswith(quoting): t += s.split(delim)
+                else:                         t += [s]
+            if len(t)!=len(header): print('issue with data row j=%s'%j)
+            data += [t]
+        j += 1
+    persons,j = {},0
     for i in range(len(data)):
-        p_id,o_taz,d_taz,target,vot = data[i][0],int(data[i][3]),int(data[i][4]),\
-                                      (1 if data[i][9]=='departure' else 0),float(data[i][10])
-        mode,purpose,raw_time,st_time = data[i][5],data[i][6],[data[i][7].rsplit(':'),data[i][8].rsplit(':')],[None,None]
-        for j in range(len(raw_time)):
-            if int(raw_time[j][0]) > 23:
-                raw_time[j] = ':'.join([str(int(raw_time[j][0])-24).zfill(2)]+raw_time[j][1:])
-                st_time[j]  = time.strptime('2 '+raw_time[j], '%d %H:%M:%S')  #:::TIME:::
-            else:
-                raw_time[j] = ':'.join(raw_time[j])
-                st_time[j]  = time.strptime('1 '+raw_time[j], '%d %H:%M:%S')  #:::TIME:::
-            st_time[j] = datetime.timedelta(days=st_time[j].tm_mday,hours=st_time[j].tm_hour,
-                                            minutes=st_time[j].tm_min,seconds=st_time[j].tm_sec)  #:::TIME:::
-            persons[p_id] = [(o_taz,st_time[0]),(d_taz,st_time[1]),mode,target,purpose,vot]
+        next_day  = [False,False]
+        prior_day = [False,False]
+        pid    = int(data[i][c_idx['personid']])
+        date   = data[i][c_idx['traveldate']]
+        o_taz  = int(data[i][c_idx['origin_bg_geoid_linked']])
+        o_add  = data[i][c_idx['o_address_recode_2_linked']]
+        d_taz  = int(data[i][c_idx['destination_bg_geoid_recode_linked']])
+        d_add  = data[i][c_idx['d_address_recode_linked']]
+        o_time = data[i][c_idx['departure_time_hhmm_linked']]
+        d_time = data[i][c_idx['arrival_time_hhmm_linked']]
+        if o_time.find(' (next day)')>=0: o_time = o_time.split(' (next day)')[0]; next_day[0] = True
+        if d_time.find(' (next day)')>=0: d_time = d_time.split(' (next day)')[0]; next_day[1] = True
+        o_time = o_time.split(' ')[0]
+        d_time = d_time.split(' ')[0]
+        try:
+            st_time = [datetime.datetime.strptime(date+' '+o_time,'%m/%d/%Y %H:%M'),
+                       datetime.datetime.strptime(date+' '+d_time,'%m/%d/%Y %H:%M')]
+            if next_day[0]: st_time[0]+=datetime.timedelta(days=1)
+            if next_day[1]: st_time[1]+=datetime.timedelta(days=1)
+            if pid in persons: persons[pid] += [[o_taz,st_time[0],d_taz,st_time[1]]]
+            else:              persons[pid]  = [[o_taz,st_time[0],d_taz,st_time[1]]]; j+=1
+        except Exception as E:
+            print('row i=%s was not well formed, possible junk data:%s\n%s'%(i,E,data[i]))
+            pass
+    return persons
 
+#---------------------------------------------------------------------------------------------
 def filter_trips(trips,dep_time='08:00:00',dep_window='00:10:00'):
     raw_time = dep_time.rsplit(':')
     if int(raw_time[0]) > 23:
@@ -475,30 +561,28 @@ def trip_set_analysis(trips,cutoff=1):
 
 #---------------------------------------------------------------------------------------------
 
-p_start = time.time()
-n_base,d_base,search_date = 'ha_network/','ha_demand/','5/24/2016'
-stops,s_idx,s_names,dist = read_gtfs_stops(n_base) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
-v_dist = gtfs_stop_time_shape_dist(n_base,s_idx) #in vehicle distances
+w_buff = 0.5 #walk distance =>straightline distance for stop-stop, and taz-stop
+n_base,d_base,search_date,search_time = 'ha_network/','ha_demand/','5/24/2016',['8:00','8:30']
+stops,s_idx,s_names,s_dist = read_gtfs_stops(n_base,max_miles=w_buff) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
+v_dist      = gtfs_stop_time_shape_dist(n_base,s_idx) #in vehicle distances
 trips,t_idx = read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
-calendar = read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
-times = read_gtfs_stop_times(n_base,s_idx,trips,t_idx,calendar,search_date)
-p_stop = time.time()
+calendar    = read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
+seqs,graph  = read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,search_date)
+print('%s total trips for date=%s'%(len(seqs),search_date))
+w_dist      = read_walk_access(n_base,s_idx,walk_buff=w_buff)
+persons     = read_person_trip_list(d_base+'csts.txt')
+seqs,graph = filter_seqs(seqs,time_window=search_time)
+print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
+p_start = time.time()
+L1 = pairwise_lcs_dict(seqs,s_dist)
+p_stop      = time.time()
+print('%s LCSWT pairs calculated in %s sec'%(len(seqs)**2,round(p_stop-p_start,2)))
 
-#stop_graph--------------------------------------------------------------------------------------
-S = {sid:{'in':[],'out':[]} for sid in range(len(stops))}
-for tid in times: #trip times have to have at least two stops
-    if times[tid].shape[0]==2:
-        S[times[tid][1][0]]['in']  += [[times[tid][0][0],times[tid][1][1]]]
-        S[times[tid][0][0]]['out'] += [[times[tid][1][0],times[tid][0][1]]]
-    elif times[tid].shape[0]>2:
-        S[times[tid][0][0]]['out'] += [[times[tid][1][0],times[tid][0][1]]]         #first stop
-        for i in range(1,times[tid].shape[0]-1,1):                                  #general case
-            S[times[tid][i][0]]['in']  += [[times[tid][i-1][0],times[tid][i][1]]]   #have in and
-            S[times[tid][i][0]]['out'] += [[times[tid][i+1][0],times[tid][i][[1]]]] #out edges
-        S[times[tid][i+1][0]]['in']  += [[times[tid][i][0],times[tid][i+1][1]]]     #last stop
-
-
-
+ss,ls,idx = seqs_to_ndarray(seqs)
+p_start = time.time()
+L2 = tu.pairwise_lcs(ss,ls,s_dist)
+p_stop      = time.time()
+print('%s LCSWT pairs calculated in %s sec'%(len(seqs)**2,round(p_stop-p_start,2)))
 
 # f_start = time.time()
 # viable_start_trips = filter_trips(n_trips,dep_time='08:00:00',dep_window='00:10:00') #all the trips that are within a pickup

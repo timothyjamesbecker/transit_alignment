@@ -10,6 +10,59 @@ cimport cython
 @cython.boundscheck(False)
 @cython.nonecheck(False)
 @cython.wraparound(False)
+def pairwise_lcs_dict(dict S, float[:,:] dist, float lim=0.5, list w = [1.0,0.0,0.0], int pos=0): #w=[match,extend,delete]
+    cdef int i,j,k,n,u,v,x,y,z,d1,d2
+    cdef list idx = list(sorted(S.keys()))
+    cdef np.ndarray D,L
+    n,l,z,k = len(S),max([len(S[i]) for i in S]),1,2
+    L = np.zeros([n,n,2],dtype=np.float32)
+    D = np.zeros([k,l+1],dtype=np.float32)
+    for x in range(n):
+        u = len(S[idx[x]])
+        for y in range(z,n,1):
+            v = len(S[idx[y]])
+            D[:] = 0.0
+            for i in range(1,u+1):      #rows--------------
+                d1 = S[idx[x]][i-1,pos]
+                for j in range(1,v+1):  #columns-----------
+                    d2 = S[idx[y]][j-1,pos]
+                    if dist[d1][d2]<=lim:              D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[d1][d2]/lim)
+                    elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
+                    else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
+            L[x][y] = L[x][y] = [D[u%k][v],u*w[0]]
+        L[x][x] = [u*w[0],u*w[0]]
+        z += 1
+    return L
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False) #w=[match,extend,delete]
+def pairwise_lcs(int[:,:,:] ss, list ls, float[:,:] dist, float lim=0.5,list w=[1.0,0.0,0.0], int pos=0):
+    cdef int i,j,k,n,u,v,x,y,z,d1,d2
+    cdef np.ndarray D,L
+    n,l,z,k = len(ss),ss.shape[0],1,2
+    L = np.zeros([n,n,2],dtype=np.float32)
+    D = np.zeros([k,l],dtype=np.float32)
+    for x in range(n):
+        u = ls[x]
+        for y in range(z,n,1):
+            v = ls[y]
+            D[:] = 0.0
+            for i in range(1,u+1):
+                d1 = ss[x,i-1,pos]
+                for j in range(1,v+1):
+                    d2 = ss[y,j-1,pos]
+                    if dist[d1][d2]<=lim:              D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[d1][d2]/lim)
+                    elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
+                    else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
+            L[x][y] = L[x][y] = [D[u%k][v],u*w[0]]
+        L[x][x] = [u*w[0],u*w[0]]
+        z += 1
+    return L
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
 def pairwise_rectangular(list stops, double max_dist=120.0, int lon=0, int lat=1, bint mi=True):
     cdef int i,j,k,n
     cdef double a,b,c,d
@@ -33,8 +86,6 @@ def pairwise_rectangular(list stops, double max_dist=120.0, int lon=0, int lat=1
                 if d<=max_dist: D[i][j] = D[j][i] = <float>d
             k += 1
     return D #return 32 bit float distances
-
-#will do haversine, road network based version?
 
 @cython.boundscheck(False)
 @cython.nonecheck(False)
