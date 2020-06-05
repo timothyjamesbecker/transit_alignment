@@ -1,16 +1,48 @@
-import glob
+#!/usr/bin/env python
+
+import argparse
 import os
 import sys
-import time
 import copy
 import datetime
 import time
+import ctypes
+import gzip
+import pickle
 import itertools as it
 import numpy as np
-import matplotlib.pyplot as plt
+import multiprocessing as mp
 import transit_utils as tu
 
+des = """Preproccess Network Tool, Copyright (C) 2020 Timothy James Becker"""
+parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
+parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
+parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
+parser.add_argument('--date',type=str,help='date to preprocess with\t[all from network]')
+parser.add_argument('--walk',type=float,help='walking distance in miles to use as upper bound for access and transfers\t[0.5]')
+parser.add_argument('--time',type=str,help='comma seperated time range for search\t[0:00,32:00]')
+parser.add_argument('--cpus',type=int,help='number of parallel cores for pairwise LCSWT\t[all]')
+# parser.add_argument('--test',action='store_true',help='')
+args = parser.parse_args()
 #--------------------------------------
+if args.in_path is not None:
+    n_base = args.in_path
+else: raise IOError
+if args.out_dir is not None:
+    out_dir = args.out_dir
+else: out_dir = n_base
+if args.date is not None:
+    search_date = args.date
+#else...
+if args.time is not None:
+    search_time = args.time.split(',')
+else: search_time = [0,32*60*60]
+if args.walk is not None:
+    walk_buffer = args.walk
+else: walk_buffer = 0.5
+if args.cpus is not None:
+    cpus = args.cpus
+else: cpus = mp.cpu_count()
 
 def mem_size(obj,unit='G'):
     if unit =='T':
@@ -172,27 +204,10 @@ def lcs(c1,c2,w=[1,0,0]):
                 D[i%k][j] = D[(i-1)%k][j]+w[2]    #top
     return [D[u%k][v],u]
 
-def pairwise_lcs_dict(S,dist,lim=0.5,w=[1.0,0.0,0.0],pos=0): #w=[match,extend,delete]
-    idx = list(sorted(S.keys()))
-    n,l,z,k = len(S),max([len(S[i]) for i in S]),1,2
-    L = np.zeros((n,n,2),dtype=np.float32)
-    D = np.zeros((k,l+1),dtype=np.float32)   #two of the longest seq
-    for x in range(n):
-        u = len(S[idx[x]])
-        for y in range(z,n,1):
-            v = len(S[idx[y]])
-            D[:] = 0.0
-            for i in range(1,u+1):      #rows--------------
-                d1 = S[idx[x]][i-1,pos]
-                for j in range(1,v+1):  #columns-----------
-                    d2 = S[idx[y]][j-1,pos]
-                    if dist[d1][d2]<=lim:              D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[d1][d2]/lim)
-                    elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
-                    else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
-            L[x][y] = L[x][y] = [D[u%k][v],u*w[0]]
-        L[x][x] = [u*w[0],u*w[0]]
-        z += 1
-    return L
+#part is the series of [i,j] index pairs into ss
+def parallel_lcs(xys):
+    tu.shared_lcs(xys,ss,ls,s_dist,l_dist)
+    return True
 
 def jaccard_sim(c1,c2):
     C1,C2 = set(c1),set(c2)
@@ -219,7 +234,7 @@ def read_gtfs_stops(n_path,max_miles=0.5,NN=2):
     stops = sorted(stops,key=lambda x: (x[1][0],x[1][1])) #spatial sort by lon,lat
     s_idx = {stops[i][0]:i for i in range(len(stops))}
     start = time.time()
-    dist = tu.pairwise_rectangular(stops) #efficient straight line estimate sufficient for upper bound
+    dist  = tu.pairwise_rectangular(stops) #efficient straight line estimate sufficient for upper bound
     stop = time.time()
 
     #334-340 Capitol Ave, Hartford, CT 06115 to 1250-1256 Farmington Ave, Hartford, CT 06105
@@ -350,26 +365,31 @@ def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,search_date,search_time=[0,
                 else:                      seqs[t_idx[trip_id]]  = [[s_idx[stop_id],st_time,-1,-1]]
         for t in seqs: seqs[t] = sorted(seqs[t],key=lambda x: (x[1],x[0]))
         seqs,G = filter_seqs(seqs,time_window=search_time) #up to 32 hours => 8am the next day = 115200
-    return seqs,G
+    return seqs,G,service_id
 
 #given seqs and time window in elapsed seconds, filter out some seqs and reindex the result
-#:::TO DO: can add spatial filters via circles and rectangular bounding boxes :::
 def filter_seqs(seqs,time_window=[0,115200]):
     S = copy.deepcopy(seqs)
     if type(time_window[0]) is str:
-        for t in ['%H:%M:%S','%H:%M','%H']: #try hours:minutes:seconds, then hours:minutes, then hours
-            passed = False
-            try:
-                st_time = time.strptime(time_window[0],t)
-                time_window[0] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
-                time_window[0] = np.int32(time_window[0].total_seconds())
-                st_time = time.strptime(time_window[1],t)
-                time_window[1] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
-                time_window[1] = np.int32(time_window[1].total_seconds())
-                time_window = sorted(time_window)
-                passed = True
-            except Exception as E: pass
-            if passed: break
+        if len(time_window[0].split(':'))==3:   t = '%H:%M:%S'
+        elif len(time_window[0].split(':'))==2: t = '%H:%M'
+        raw_time = [time_window[0].split(':'),time_window[1].split(':')]
+        next_day = [datetime.timedelta(days=0),datetime.timedelta(days=0)]
+        if int(raw_time[0][0])>23:
+            time_window[0] = ':'.join([str(int(raw_time[0][0])-24)]+raw_time[0][1:])
+            next_day[0]  = datetime.timedelta(days=1)
+        if int(raw_time[1][0])>23:
+            time_window[1] = ':'.join([str(int(raw_time[1][0])-24)]+raw_time[1][1:])
+            next_day[1]  = datetime.timedelta(days=1)
+        st_time = time.strptime(time_window[0],t)
+        time_window[0] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
+        time_window[0] += next_day[0]
+        time_window[0] = np.int32(time_window[0].total_seconds())
+        st_time = time.strptime(time_window[1],t)
+        time_window[1] = datetime.timedelta(hours=st_time.tm_hour,minutes=st_time.tm_min,seconds=st_time.tm_sec)
+        time_window[1] += next_day[1]
+        time_window[1] = np.int32(time_window[1].total_seconds())
+        time_window = sorted(time_window)
     for t in S:
         teqs = []
         if type(S[t]) is not list: S[t] = S[t].tolist()
@@ -424,11 +444,13 @@ def seqs_to_ndarray(seqs):
     sk = sorted(list(seqs.keys()))
     idx = {sk[i]:i for i in range(len(sk))}
     max_len = max([len(seqs[k]) for k in seqs])
-    D,L = np.zeros((len(seqs),max_len,4),dtype=np.int32),[]
+    D = np.zeros((len(seqs),max_len,4),dtype=np.int32)
+    L = np.zeros((len(seqs),),dtype=np.int32)
+    D = D.reshape(len(seqs),max_len,4)
     for i in range(len(sk)):
         n = len(seqs[sk[i]])
         for j in range(n): D[i,:n,:] = seqs[sk[i]][:]
-        L += [n]
+        L[i] = n
     return D,L,idx
 
 #from fast trips data analysis---------------------------------------------------
@@ -464,144 +486,81 @@ def read_walk_access(n_path,s_idx,walk_buff=0.5,walk_conv=1.0):
             else:               D[s_idx[sid]] = {taz:np.float32(walk[taz][sid][0])} #egress=0
     return D
 
-def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want to play around with demand files : IE dynamic...
-    header,data = [],[]
-    with open(path,'r') as f:
-        raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
-    header = [f for f in raw[0].rsplit(delim)]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
-    c_idx = {header[i]:i for i in range(len(header))}
-    data,j = [],0
-    for row in raw[1:]:
-        quotes = row.count(quoting)//2
-        if quotes<1: data += [row.split(',')]
-        else:        #some variable amount of quoting
-            sect,t,sub = [],[],row
-            for i in range(quotes):
-                start = sub.find(quoting)
-                end   = sub[start+1:].find(quoting)+1
-                if start>0: sect += [sub[:start-1],sub[start:start+end+1]]
-                else:       sect += [sub[start:start+end+1]]
-                sub = sub[start+end+2:]
-            sect += [sub]
-            for s in sect:
-                if not s.startswith(quoting): t += s.split(delim)
-                else:                         t += [s]
-            if len(t)!=len(header): print('issue with data row j=%s'%j)
-            data += [t]
-        j += 1
-    persons,j = {},0
-    for i in range(len(data)):
-        next_day  = [False,False]
-        prior_day = [False,False]
-        pid    = int(data[i][c_idx['personid']])
-        date   = data[i][c_idx['traveldate']]
-        o_taz  = int(data[i][c_idx['origin_bg_geoid_linked']])
-        o_add  = data[i][c_idx['o_address_recode_2_linked']]
-        d_taz  = int(data[i][c_idx['destination_bg_geoid_recode_linked']])
-        d_add  = data[i][c_idx['d_address_recode_linked']]
-        o_time = data[i][c_idx['departure_time_hhmm_linked']]
-        d_time = data[i][c_idx['arrival_time_hhmm_linked']]
-        if o_time.find(' (next day)')>=0: o_time = o_time.split(' (next day)')[0]; next_day[0] = True
-        if d_time.find(' (next day)')>=0: d_time = d_time.split(' (next day)')[0]; next_day[1] = True
-        o_time = o_time.split(' ')[0]
-        d_time = d_time.split(' ')[0]
-        try:
-            st_time = [datetime.datetime.strptime(date+' '+o_time,'%m/%d/%Y %H:%M'),
-                       datetime.datetime.strptime(date+' '+d_time,'%m/%d/%Y %H:%M')]
-            if next_day[0]: st_time[0]+=datetime.timedelta(days=1)
-            if next_day[1]: st_time[1]+=datetime.timedelta(days=1)
-            if pid in persons: persons[pid] += [[o_taz,st_time[0],d_taz,st_time[1]]]
-            else:              persons[pid]  = [[o_taz,st_time[0],d_taz,st_time[1]]]; j+=1
-        except Exception as E:
-            print('row i=%s was not well formed, possible junk data:%s\n%s'%(i,E,data[i]))
-            pass
-    return persons
-
-#---------------------------------------------------------------------------------------------
-def filter_trips(trips,dep_time='08:00:00',dep_window='00:10:00'):
-    raw_time = dep_time.rsplit(':')
-    if int(raw_time[0]) > 23:
-        d_time = ':'.join([str(int(raw_time[0]) - 24).zfill(2)] + raw_time[1:])
-        d_time = time.strptime(raw_time, '%H:%M:%s')
-    else:
-        d_time = time.strptime(dep_time, '%H:%M:%S')
-    d_time = datetime.timedelta(hours=d_time.tm_hour+24, minutes=d_time.tm_min, seconds=d_time.tm_sec)
-
-    raw_time = dep_window.rsplit(':')
-    if int(raw_time[0]) > 23:
-        w_time = ':'.join([str(int(raw_time[0])-24).zfill(2)] + raw_time[1:])
-        w_time = time.strptime(raw_time, '%H:%M:%s')
-    else:
-        w_time = time.strptime(dep_window, '%H:%M:%S')
-    w_time = datetime.timedelta(hours=w_time.tm_hour, minutes=w_time.tm_min, seconds=w_time.tm_sec)
-
-    S = {}
-    for t in trips:
-        for i in range(len(trips[t])):
-            if trips[t][i][1] >= (d_time - w_time) and trips[t][i][1] <= (d_time + w_time):
-                S[t] = copy.deepcopy(trips[t])
-                break
-    return S
-
-def trip_set_analysis(trips,cutoff=1):
-    T,M = {},{}
-    for t in trips:
-        T[t] = set([x[0] for x in trips[t]])
-    for i,j in it.combinations(trips.keys(),2): #set feature magnitudes-----------------------
-        F = [len(T[i].intersection(T[j])),len(T[j].union(T[i]))] #iIj,iUj => I/J = jaccard sim
-        if F[0]>=cutoff:
-            if i in M: M[i] += [F+[j]]
-            else:      M[i]  = [F+[j]]
-            if j in M: M[j] += [F+[i]]
-            else:      M[j]  = [F+[i]]
-    return M
-
-#read passenger data from demand file-------------------------
-#read passenger data from demand file-------------------------
-
+def trip_set_analysis(seqs,stops,idx):
+    t_start = time.time()
+    F,S,E,D = {},{},set([]),[]
+    for t in seqs:
+        S[t],L = set([]),[s for s in seqs[t][:,0]]
+        for l in L:
+            for j in stops[l][2]: S[t].add(j[0])
+    for i,j in it.combinations(sorted(list(S.keys())),2):
+        if i>j: i,j = j,i
+        if (i,j) not in F: F[(i,j)] = [len(S[i].intersection(S[j])),len(S[j].union(S[i]))]
+    for k in F:
+        if F[k][0]<1: E.add(k)
+    E = sorted(list(E))
+    for e in E:
+        D += [sorted([idx[e[0]],idx[e[1]]])]
+    t_stop = time.time()
+    print('found %s trip pairs to exclude'%(len(E)))
+    return E
 #---------------------------------------------------------------------------------------------
 
-w_buff = 0.5 #walk distance =>straightline distance for stop-stop, and taz-stop
-n_base,d_base,search_date,search_time = 'ha_network/','ha_demand/','5/24/2016',['8:00','8:30']
-stops,s_idx,s_names,s_dist = read_gtfs_stops(n_base,max_miles=w_buff) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
-v_dist      = gtfs_stop_time_shape_dist(n_base,s_idx) #in vehicle distances
-trips,t_idx = read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
-calendar    = read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
-seqs,graph  = read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,search_date)
-print('%s total trips for date=%s'%(len(seqs),search_date))
-w_dist      = read_walk_access(n_base,s_idx,walk_buff=w_buff)
-persons     = read_person_trip_list(d_base+'csts.txt')
-seqs,graph = filter_seqs(seqs,time_window=search_time)
-print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
-p_start = time.time()
-L1 = pairwise_lcs_dict(seqs,s_dist)
-p_stop      = time.time()
-print('%s LCSWT pairs calculated in %s sec'%(len(seqs)**2,round(p_stop-p_start,2)))
+if __name__ == '__main__':
+    print('starting to preprocess GTFS data folder = %s'%n_base)
+    stops,stop_idx,s_names,s_dist = read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
+    v_dist      = gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
+    trips,trip_idx = read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
+    calendar    = read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
+    seqs,graph,service_id  = read_gtfs_seqs(n_base,stop_idx,trips,trip_idx,calendar,search_date)
+    print('%s total trips for date=%s'%(len(seqs),search_date))
+    w_dist      = read_walk_access(n_base,stop_idx,walk_buff=walk_buffer)
+    seqs,graph  = filter_seqs(seqs,time_window=search_time)
+    print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
 
-ss,ls,idx = seqs_to_ndarray(seqs)
-p_start = time.time()
-L2 = tu.pairwise_lcs(ss,ls,s_dist)
-p_stop      = time.time()
-print('%s LCSWT pairs calculated in %s sec'%(len(seqs)**2,round(p_stop-p_start,2)))
+    #|| lcs in cython--------------------------------------------------------------------------
+    ss,ls,seq_idx = seqs_to_ndarray(seqs)
+    #globally bound mp.ctypes arrays--------------------------------------------------------------------------
+    ss_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ss.shape[0]*ss.shape[1]*ss.shape[2]),lock=False))
+    ss_array  = ss_array.reshape(ss.shape[0],ss.shape[1],ss.shape[2])
+    ss_array[:,:,:] = ss[:,:,:]
+    ss = ss_array
+    ls_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ls.shape[0]),lock=False))
+    ls_array  = ls_array.reshape(ls.shape[0])
+    ls_array[:] = ls[:]
+    ls = ls_array
+    s_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(s_dist.shape[0]*s_dist.shape[1]),lock=False))
+    s_array  = s_array.reshape(s_dist.shape[0],s_dist.shape[1])
+    s_array[:,:] = s_dist[:,:]
+    s_dist = s_array
+    l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*2,lock=False))
+    l_dist    = l_dist.reshape(len(ls),len(ls),2)
+    #globally bound mp.ctypes arrays--------------------------------------------------------------------------
 
-# f_start = time.time()
-# viable_start_trips = filter_trips(n_trips,dep_time='08:00:00',dep_window='00:10:00') #all the trips that are within a pickup
-# clusters = trip_set_analysis(viable_start_trips,cutoff=1) #at least one stop the same
-# f_stop = time.time()
-#
-#
-# S = {}
-# for t in viable_start_trips:
-#     for i in range(len(viable_start_trips[t])):
-#         sid,td = viable_start_trips[t][i][0],viable_start_trips[t][i][1]
-#         if sid in S: S[sid] += [[t,td]]
-#         else:        S[sid]  = [[t,td]]
-# for sid in S: S[sid] = sorted(S[sid],key=lambda x: x[1])
-
-#
-# print('finished processing stops/trips prior to filtering in %s sec'%round(p_stop-p_start,2))
-# print('finished time filtering and set analysis in %s sec'%round(f_stop-f_start,2))
-# #take a look at clusters----------------------------------------
-# C = np.asarray([len(clusters[x])for x in clusters])
-# # plt.hist(C,bins='auto')
-# # plt.show()
+    cpus = mp.cpu_count()
+    xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
+    partitions,n = [],len(xys)//cpus
+    for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
+    if len(xys)%cpus>0:   partitions[-1] += xys[-1*(len(xys)%cpus):]
+    for i in range(len(partitions)):
+        temp = np.zeros((len(partitions[i]),2),dtype=np.int32)
+        temp[:] = [k for k in partitions[i]]
+        partitions[i] = temp
+    #fire it up---------------------------------------------------
+    t_start = time.time()
+    print('starting || computation')
+    p1 = mp.Pool(processes=cpus)
+    for i in range(len(partitions)):
+        p1.apply_async(parallel_lcs,args=(partitions[i],))
+    p1.close()
+    p1.join()
+    t_stop = time.time()
+    print('ending || computation in %s sec'%round(t_stop-t_start,2))
+    # || lcs in cython--------------------------------------------------------------------------
+    print('saving network data structures to disk (distance matrices, sequences and graph)')
+    DATA = {'stops':stops,'s_names':s_names,'stop_idx':stop_idx,'s_dist':s_dist,'v_dist':v_dist,
+            'w_dist':w_dist,'trips':trips,'trip_idx':trip_idx,'seqs':seqs,'graph':graph,
+            'l_dist':l_dist,'l_idx':seq_idx,'service_id':service_id}
+    with gzip.GzipFile(out_dir+'/network.%s.%s-%s.pickle.gz'%(service_id,search_time[0],search_time[1]),'wb') as f:
+        pickle.dump(DATA,f)
+        print('finished writing network data structures, exiting...')
