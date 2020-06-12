@@ -10,28 +10,17 @@ cimport cython
 @cython.boundscheck(False)
 @cython.nonecheck(False)
 @cython.wraparound(False) #w=[match,extend,delete]
-def pairwise_lcs(int[:,:,:] ss, list ls, float[:,:] dist, float lim=0.5,list w=[1.0,0.0,0.0], int pos=0):
-    cdef int i,j,k,n,u,v,x,y,z,d1,d2
-    cdef np.ndarray D,L
-    n,l,z,k = len(ss),ss.shape[0],1,2
-    L = np.zeros([n,n,2],dtype=np.float32)
-    D = np.zeros([k,l+1],dtype=np.float32)
-    for x in range(n):
-        u = ls[x]
-        for y in range(z,n,1):
-            v = ls[y]
-            D[:] = 0.0
-            for i in range(1,u+1):
-                d1 = ss[x,i-1,pos]
-                for j in range(1,v+1):
-                    d2 = ss[y,j-1,pos]
-                    if dist[d1][d2]<=lim:              D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[d1][d2]/lim)
-                    elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
-                    else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
-            L[x][y] = L[x][y] = [D[u%k][v],u*w[0]]
-        L[x][x] = [u*w[0],u*w[0]]
-        z += 1
-    return L
+def lcs(int[:,:] c1, int[:,:] c2, float[:,:] dist, float lim=0.5,list w=[1.0,0.0,0.0], int pos=0):
+    cdef int i,j,k,n,u,v
+    k,u,v = 2,len(c1),len(c2)
+    if u<v: u,v,c1,c2 = v,u,c2,c1
+    cdef np.ndarray D = np.zeros([k,v+1],dtype=np.float32)
+    for i in range(1,u+1):
+        for j in range(1,v+1):
+            if dist[c1[i-1,pos]][c2[j-1,pos]]<=lim: D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[c1[i-1,pos]][c2[j-1,pos]]/lim)
+            elif D[i%k][j-1] >= D[(i-1)%k][j]:      D[i%k][j] = D[i%k][j-1]+w[1]
+            else:                                   D[i%k][j] = D[(i-1)%k][j]+w[2]
+    return [D[(u+1)%k][v],v,u]
 
 @cython.boundscheck(False)
 @cython.nonecheck(False)
@@ -39,15 +28,15 @@ def pairwise_lcs(int[:,:,:] ss, list ls, float[:,:] dist, float lim=0.5,list w=[
 def shared_lcs(int [:,:] xys, int[:,:,:] ss, int[:] ls, float[:,:] s_dist, float[:,:,:] l_dist,
                float lim=0.5, list w=[1.0,0.0,0.0], int pos=0):
     cdef int a,i,j,k,u,v,x,y,d1,d2
-    k,l = 1,ss.shape[1] #longest sequence in ss is the actual dimension
+    k,l = 2,ss.shape[1] #longest sequence in ss is the actual dimension
     cdef np.ndarray D = np.zeros([k,l+1],dtype=np.float32) #reuse a circular DP table
     for a in range(xys.shape[0]):
         x,y = xys[a,:]
         u,v = ls[x],ls[y]
-        l_dist[x][x][0] = l_dist[x][x][1] = u*w[0]
-        l_dist[y][y][0] = l_dist[y][y][1] = v*w[0]
+        l_dist[x][x][0] = l_dist[x][x][1] = l_dist[x][x][2] = u*w[0]
+        l_dist[y][y][0] = l_dist[y][y][1] = l_dist[y][y][2] = v*w[0]
         if u<v: u,v,x,y = v,u,y,x
-        D[:] = 0.0
+        D[:,:] = 0.0
         for i in range(1,u+1):
             d1 = ss[x,i-1,pos]
             for j in range(1,v+1):
@@ -55,8 +44,9 @@ def shared_lcs(int [:,:] xys, int[:,:,:] ss, int[:] ls, float[:,:] s_dist, float
                 if s_dist[d1][d2]<=lim:            D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-s_dist[d1][d2]/lim)
                 elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
                 else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
-        l_dist[x][y][0] = l_dist[y][x][0] = D[u%k][v]
-        l_dist[x][y][1] = l_dist[y][x][1] = u*w[0]
+        l_dist[x][y][0] = l_dist[y][x][0] = D[(u+1)%k][v]
+        l_dist[x][y][1] = l_dist[y][x][1] = v*w[0]
+        l_dist[x][y][2] = l_dist[y][x][2] = u*w[0]
 #no return for shared memory version--------------------------------------------------------------------------
 
 
