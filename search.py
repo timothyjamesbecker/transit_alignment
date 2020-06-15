@@ -8,6 +8,7 @@ import pickle
 import subprocess
 import numpy as np
 import itertools as it
+import transit_utils as tu
 import read_utils as ru
 
 def mem_size(obj,unit='G'):
@@ -205,79 +206,61 @@ def ldist_cluster(l_dist,thresh=0.5):
 #graph is the time-based stop graph that is used for calculating waiting and walking transfers
 #buff_time is used to calculate waiting tranfers and 10min=600 seconds
 #L is the legs at that point in the search, which works like a stack: [tid,tdx,sid,stime,penalty]
-def DFS(V,c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,buff_time=10,walk_speed=3,pw=[0,10,20],trans=5,verbose=False):
+def DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,
+        trans=3,buff_time=10,walk_speed=3,pw=[0,10,20],verbose=False):
     c_stop,c_time,out_sdx,in_sdx = seqs[c_tid][c_tdx-1] #will be graph indexes for in and out links
-    if verbose: print('c_tid=%s,c_tdx=%s,c_stop=%s,c_time=%s,trans=%s'%(c_tid,c_tdx,c_stop,c_time,trans))
-    L,F = [],[] #L is for prepending links, F is for managing returning branches that are collected
-
-    if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exheded time or number of transfers
-        return [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],pw[0]]]
+    D,B,scores = [],[],[] #L is for prepending links, F is for managing returning branches that are collected
+    if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exeeded time or number of transfers
+        counts[-3]+=1
+        D = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+        return D
     else: #search using [(1)] direct [(2)] stoping [(3)] walking, followed by optimization [(4)]
-
-        #[(1)] iterate on the direct links first hence depth first search (DFS):::::::::::::::::::::::::::::::::::::::::
         if seqs[c_tid][c_tdx][0] in d_stops:
-            for d_stop in d_stops:
-                if seqs[c_tid][c_tdx][0]==d_stop: break
-            print('-------------------------------------- found d_stop=%s -------------------------------------'%d_stop)
-            L =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],pw[0]]]
-            return L
+            print('------- found stop=%s -------'%seqs[c_tid][c_tdx][0])
+            counts[1]+=1
+            D =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+            return D
         elif c_tdx<len(seqs[c_tid])-1: #if c_tdx==len(seqs[c_tid] then it is the last stop...
-            L  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],pw[0]]]
-            F += [L+DFS(V,c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,trans=trans)]              #directs => depth first
-        #::: [(1)] :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
-        #[(2)] now check branching stop-waiting links:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-        if verbose: print('no direct trips found for tid=%s , trying waiting transfers...'%c_tid)
+            counts[0]+=1
+            D  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+            B += [D+DFS(c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)]#directs => depth first
         G,time_a,time_b = graph[c_stop]['out'],c_time,c_time+buff_time*60
-        gidx = ([] if len(G)<1 else np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0])
+        gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
         for i in gidx:
-            ws = graph[c_stop]['out'][i] #wait at the stop = ws
+            ws = G[i] #wait at the stop = ws
             if ws[2]!=c_tid and ws[3]+1<len(seqs[ws[2]])-1 and seqs[ws[2]][ws[3]][1]<d_time: #link end time-------------
-                if verbose: print('waiting transfer was found...')
-                L  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
-                F += [L+DFS(V,ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,trans=trans-1)]    #recurse and collect options
-        #::: [(2)] :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
-        #[(3)] now we check walking NN links and calculate penalties like in [(2)]::::::::::::::::::::::::::::::::::::::
-        if verbose: print('no direct trips found for tid=%s, trying walking transfers...'%c_tid)
-        w_secs = (60.0*60.0)/walk_speed
+                counts[-1]+=1
+                D  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
+                B += [D+DFS(ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)] #recurse waiting
+        w_secs = int(round((60*60)/walk_speed))
         for j in range(len(stops[c_stop][2])):
-            wt_stop = stops[c_stop][2][j][0] #found a walking stop
+            wt_stop = stops[c_stop][2][j][0]                        #found a walking stop
             time_a  = int(c_time+stops[c_stop][2][j][1]*w_secs+0.5) #time once you get to the stop
-            time_b  = min(d_time,time_a+buff_time*60)               #waiting time after you get to the stop
-            if time_a<d_time and wt_stop in graph: #filter those that will go past max time by adding the walk time
+            time_b  = int(min(d_time,time_a+buff_time*60))          #waiting time after you get to the stop
+            if time_a<d_time and wt_stop in graph: #past max time from the walk time period
                 G     = graph[wt_stop]['out']
-                gidx = ([] if len(G)<1 else np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0])
+                gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
                 for i in gidx:
-                    wt = graph[wt_stop]['out'][i] #don't want people getting on the same trip after walking...
+                    wt = G[i] #don't want people getting on the same trip after walking...
                     if wt[2]!=c_tid and wt[3]+1<len(seqs[wt[2]]) and seqs[wt[2]][wt[3]][1]<d_time:
                         if wt[2]!=c_tid and seqs[wt[2]][wt[3]][1]<d_time: #trip end times are within the boundry--------
-                            L  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
-                            L += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
-                            if verbose: print('walking transfer was found:%s'%L)
-                            F += [L+DFS(V,wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,trans=trans-1)]
-        #::: [(3)] :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
-
-    if len(F)>0: #[(4)] optimize/filter the returned paths (some were pruned via time/transfer limits:::::::::::::::::::
-        print('\npath branches have returned, scoring the results of %s branches'%len(F))
-        min_score = [np.finfo(np.float32).max,0] #default for single branch is single
-        for i in range(len(F)):
-            if F[i][-1][2] in d_stops: #need to have a trip that ends at one of the d_stops
-                print('c_tid=%s, c_tdx=%s, F[i]:%s'%(c_tid,c_tdx,F[i]))
-                score = sum([abs(f[3]-c_time)+f[4] for f in F[i]]) #time in seconds
-                if score<min_score[0]: min_score = [score,i]
-        if min_score[0]<np.finfo(np.float32).max: #found a valid trip
-            print('score=%s,F[i]=%s'%(min_score,F[min_score[1]]))
-            #try to save this with V somehow
-            V += [F[min_score[1]]]
-            return F[min_score[1]]
+                            counts[-2]+=1
+                            D  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
+                            D += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
+                            B += [D+DFS(wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)]
+    if len(B)>0: #[(4)] optimize/filter the returned paths (some were pruned via time/transfer limits:::::::::::::::::::
+        for i in range(len(B)):
+            if len(B[i])>0 and B[i][len(B[i])-1][2] in d_stops: #need to have a trip that ends at one of the d_stops
+                scores += [[sum([B[i][j][4] for j in range(len(B[i]))]),i]]
+        if len(scores)>0: #found a valid trip
+            return B[sorted(scores)[0][1]]
         else: return []
     else: return []
 
 #pick the best path out a bunch that must have a d_stop in it
-# def path_score(F):
-
-
+def path_time_score(trip,c_time):
+    if len(trip)>0:
+        return sum([trip[i][4] for i in range(len(trip))])
 
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['7:00','8:30']
@@ -302,18 +285,28 @@ service_ids = get_processed_service_ids(D)
 # print('searched %s person trip candidates in %s sec'%(x,round(t_stop-t_start,2)))
 
 i,j = 6,0
-person_trip = persons[6][0]
+person_trip = persons[6][1]
 C = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
 service_id = list(C.keys())[0]
 candidates = C[service_id]
 c_tid,c_tdx,d_stop,d_time = candidates[0][2],candidates[0][3],candidates[0][5][0],candidates[0][6]
 d_stops = set([])
 for c in candidates: d_stops.add(c[5][0])
-seqs,graph = D[service_id]['seqs'],D[service_id]['graph']
+seqs,graph,l_dist,l_idx = D[service_id]['seqs'],D[service_id]['graph'],D[service_id]['l_dist'],D[service_id]['l_idx']
 c_stop,c_time = seqs[c_tid][c_tdx-1][0:2]
+
+t_start = time.time()
 buff_time,walk_speed,trans = 10,3,1
-V = [] #grabs some of the best paths for further analysis
-F = DFS(V,c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,trans=trans)
+
+counts = {-3:0,-2:0,-1:0,0:0,1:0}
+F = DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
+t_stop = time.time()
 print('starting_stop=%s, starting_time=%s'%(c_stop,c_time))
 print('destination stops=%s, time_limit=%s'%(d_stops,d_time))
+print('python search completed in %s secs'%round(t_stop-t_start,2))
+
+# t_start = time.time()
+# F2 = tu.DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
+# t_stop  = time.time()
+# print('cython search completed in %s secs'%round(t_stop-t_start,2))
 

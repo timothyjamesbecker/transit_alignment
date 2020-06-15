@@ -223,6 +223,7 @@ def filter_seqs(seqs,time_window=[0,115200]):
         for d in ['in','out']:
             if len(G[sid][d])>0:
                 G[sid][d] = np.array(sorted(G[sid][d],key=lambda x: (x[1],x[0])),dtype=np.int32)
+            else: G[sid][d] = np.array([],dtype=np.int32)
         for i in range(len(G[sid]['in'])):
             tid,idx = G[sid]['in'][i][2],G[sid]['in'][i][3]
             S[tid][idx][2] = i

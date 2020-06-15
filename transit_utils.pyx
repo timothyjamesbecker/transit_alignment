@@ -126,3 +126,54 @@ def shape_dist_correction(list stops, dict E, int NN=2, float max_nn=0.25, verbo
                             if two_link: e[1] += 1
     if verbose: print('%s shape distance corrections made'%(e))
     return C
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
+def DFS(int c_tid, int c_tdx, set d_stops, int d_time, list stops, dict seqs, dict graph, float[:,:] s_dist, float[:,:,:] l_dist,
+        int trans=5,int buff_time=10, int walk_speed=3, list pw=[0,10,20], bint verbose=False):
+    cdef int i,j,c_stop,c_time,out_sdx,in_sdx,w_secs,wt_stop,time_a,time_b
+    cdef list D,B,gidx,scores
+    cdef np.ndarray G,ws,wt
+    c_stop,c_time,out_sdx,in_sdx = seqs[c_tid][c_tdx-1] #will be graph indexes for in and out links
+    D,B,scores = [],[],[] #L is for prepending links, F is for managing returning branches that are collected
+    if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exheded time or number of transfers
+        D = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+        return D
+    else: #search using [(1)] direct [(2)] stoping [(3)] walking, followed by optimization [(4)]
+        if seqs[c_tid][c_tdx][0] in d_stops:
+            D =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+            return D
+        elif c_tdx<len(seqs[c_tid])-1: #if c_tdx==len(seqs[c_tid] then it is the last stop...
+            D  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
+            B += [D+DFS(c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)]#directs => depth first
+        G,time_a,time_b = graph[c_stop]['out'],c_time,c_time+buff_time*60
+        gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
+        for i in gidx:
+            ws = G[i] #wait at the stop = ws
+            if ws[2]!=c_tid and ws[3]+1<len(seqs[ws[2]])-1 and seqs[ws[2]][ws[3]][1]<d_time: #link end time-------------
+                D  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
+                B += [D+DFS(ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)] #recurse waiting
+        w_secs = int(round((60*60)/walk_speed))
+        for j in range(len(stops[c_stop][2])):
+            wt_stop = stops[c_stop][2][j][0]                        #found a walking stop
+            time_a  = int(c_time+stops[c_stop][2][j][1]*w_secs+0.5) #time once you get to the stop
+            time_b  = int(min(d_time,time_a+buff_time*60))          #waiting time after you get to the stop
+            if time_a<d_time and wt_stop in graph: #past max time from the walk time period
+                G     = graph[wt_stop]['out']
+                gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
+                for i in gidx:
+                    wt = G[i] #don't want people getting on the same trip after walking...
+                    if wt[2]!=c_tid and wt[3]+1<len(seqs[wt[2]]) and seqs[wt[2]][wt[3]][1]<d_time:
+                        if wt[2]!=c_tid and seqs[wt[2]][wt[3]][1]<d_time: #trip end times are within the boundry--------
+                            D  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
+                            D += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
+                            B += [D+DFS(wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)]
+    if len(B)>0: #[(4)] optimize/filter the returned paths (some were pruned via time/transfer limits:::::::::::::::::::
+        for i in range(len(B)):
+            if len(B[i])>0 and B[i][len(B[i])-1][2] in d_stops: #need to have a trip that ends at one of the d_stops
+                scores += [[sum([B[i][j][4] for j in range(len(B[i]))]),i]]
+        if len(scores)>0: #found a valid trip
+            return B[sorted(scores)[0][1]]
+        else: return []
+    else: return []
