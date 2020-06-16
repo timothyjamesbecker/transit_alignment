@@ -79,7 +79,7 @@ def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want
     return ps
 
 #will load cached data or if not present, generate it
-def load_network_data(path,walk=0.5,search_date=None,search_time=[0,115200]):
+def load_network_data(n_base,walk=0.5,search_date=None,search_time=[0,115200]):
     if os.path.exists(n_base+'/network.pickle.gz'):
         with gzip.GzipFile(glob.glob(n_base+'/network*pickle.gz')[0],'rb') as f:
             D = pickle.load(f)
@@ -90,9 +90,12 @@ def load_network_data(path,walk=0.5,search_date=None,search_time=[0,115200]):
                    '--time %s,%s'%(search_time[0],search_time[1])]
         if search_date is not None:  command += ['--date',search_date]
         try:
+            t_start = time.time()
             out = ''
             out = subprocess.check_output(' '.join(command),shell=True)
             if out!='': print(out.decode(encoding='utf-8'))
+            t_stop = time.time()
+            print('preprocessing in %s sec'%round(t_stop-t_start,2))
             with gzip.GzipFile(glob.glob(n_base+'/network.pickle.gz')[0],'rb') as f:
                 D = pickle.load(f)
         except Exception as E: pass
@@ -304,9 +307,3 @@ t_stop = time.time()
 print('starting_stop=%s, starting_time=%s'%(c_stop,c_time))
 print('destination stops=%s, time_limit=%s'%(d_stops,d_time))
 print('python search completed in %s secs'%round(t_stop-t_start,2))
-
-# t_start = time.time()
-# F2 = tu.DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
-# t_stop  = time.time()
-# print('cython search completed in %s secs'%round(t_stop-t_start,2))
-
