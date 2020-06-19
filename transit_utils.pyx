@@ -26,7 +26,7 @@ def lcs(int[:,:] c1, int[:,:] c2, float[:,:] dist, float lim=0.5,list w=[1.0,0.0
 @cython.nonecheck(False)
 @cython.wraparound(False) #This version needs shared memory arrays: xys, ss, ls, s_dist, l_dist---------------
 def shared_lcs(int [:,:] xys, int[:,:,:] ss, int[:] ls, float[:,:] s_dist, float[:,:,:] l_dist,
-               float lim=0.5, list w=[1.0,0.0,0.0], int pos=0):
+               float lim=0.5, list w=[1.0,0.0,0.0], bint pos=0):
     cdef int a,i,j,k,u,v,x,y,d1,d2
     k,l = 2,ss.shape[1] #longest sequence in ss is the actual dimension
     cdef np.ndarray D = np.zeros([k,l+1],dtype=np.float32) #reuse a circular DP table
@@ -48,6 +48,54 @@ def shared_lcs(int [:,:] xys, int[:,:,:] ss, int[:] ls, float[:,:] s_dist, float
         l_dist[x][y][1] = l_dist[y][x][1] = v*w[0]
         l_dist[x][y][2] = l_dist[y][x][2] = u*w[0]
 #no return for shared memory version--------------------------------------------------------------------------
+
+#computes the LCTS for wiating and walking transfers
+#xys is a  nx2 array of trip_id pairs to compute lcswt on,
+#ss is the tail-padded shared-memory version of the stop sequences, ls is the length of each sequence
+#s_dist is the rectangular stop to stop distance in miles, with lim acting as the limiter
+#l_dist is shared memory buffer containing all the pairs that are being computed in ||
+#mw is matching weights for mw[0] perfect/approx match, mw[1] delete, mw[2] extended (number of matching stops)
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False) #This version needs shared memory arrays: xys, ss, ls, s_dist, l_dist------------------------------------------------
+def shared_lcts(int [:,:] xys, int[:,:,:] ss, int[:] ls, float[:,:] s_dist, float[:,:,:] l_dist,
+                list mw=[1.0,0.0,0.0], float lim=0.5, float walk_speed=3.0, float min_v=1.0):
+    cdef int i,j,k,t,u,v,x,y,z,s1,s2,ti_a,ti_b,tj_a,tj_b,w_secs,w_time,buff_time
+    k,l = 2,ss.shape[1] #longest sequence in ss is the actual dimension
+    cdef np.ndarray D = np.zeros([k,l+1,2],dtype=np.float32) #reuse a circular DP table buffer
+    w_secs,buff_time = int((60*60)/walk_speed+0.5),int(lim*(60*60)/walk_speed+0.5)
+    for t in range(xys.shape[0]):
+        x,y = xys[t,:]
+        u,v = ls[x],ls[y]
+        l_dist[x][x][0] = l_dist[x][x][1] = l_dist[x][x][2] = l_dist[x][x][3] = u*mw[0] #sequences match themselves
+        l_dist[y][y][0] = l_dist[y][y][1] = l_dist[y][y][2] = l_dist[y][y][3] = v*mw[0] #by their nature
+        for z in range(2): #tx to ty and then switch to ty to tx ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+            D[:,:,:] = 0.0 # dim(x) x dim(y) x 2: first outer dim is for waiting transfers, second is walking
+            for i in range(1,u+1):
+                s1,ti_a,ti_b = ss[x,i-1,0],ss[x,i-1,1],ss[x,i-1,1]+buff_time
+                for j in range(1,v+1):
+                    s2,tj_a,tj_b = ss[y,j-1,0],ss[y,j-1,1],ss[y,j-1,1]+buff_time
+                    w_time = int(ti_a+s_dist[s1][s2]*w_secs+0.5)
+                    #waiting transfer table--------------------------------------------------------------------------------------------------
+                    if s1==s2 and ti_a<=tj_a and ti_b>=tj_a:
+                        D[i%k][j][0] = D[(i-1)%k][j-1][0]+mw[0]*(1.0-(1.0-min_v)*(tj_a-ti_a)/buff_time)
+                    elif D[i%k][j-1][0]>=D[(i-1)%k][j][0]:
+                        D[i%k][j][0] = D[i%k][j-1][0]+mw[1]
+                    else:
+                        D[i%k][j][0] = D[(i-1)%k][j][0]+mw[2]
+                    #walking transfer table--------------------------------------------------------------------------------------------------
+                    if s_dist[s1][s2]<lim and w_time>=tj_a and w_time<=tj_b:
+                        D[i%k][j][1] = D[(i-1)%k][j-1][1]+mw[0]*(1.0-(1.0-min_v)*s_dist[s1][s2]/lim)
+                    elif D[i%k][j-1][1]>=D[(i-1)%k][j][1]:
+                        D[i%k][j][1] = D[i%k][j-1][1]+mw[1]
+                    else:
+                        D[i%k][j][1] = D[(i-1)%k][j][1]+mw[2]
+            l_dist[x][y][0] = D[(u+1)%k][v][0]
+            l_dist[x][y][1] = D[(u+1)%k][v][1]
+            l_dist[x][y][2] = v*mw[0]
+            l_dist[x][y][3] = u*mw[0]
+            u,v,x,y = v,u,y,x #switch :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+#no return for shared memory version---------------------------------------------------------------------------------------------------------
 
 
 @cython.boundscheck(False)
@@ -126,6 +174,76 @@ def shape_dist_correction(list stops, dict E, int NN=2, float max_nn=0.25, verbo
                             if two_link: e[1] += 1
     if verbose: print('%s shape distance corrections made'%(e))
     return C
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
+def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
+                    int sit=10*60, int walk=10*60, float speed=3.0):
+    cdef int a,b,i,j,k,x,y,s,w,s_time,w_time,w_secs,w_dist,idx,idx_a,idx_b
+    cdef tuple tx,ty
+    cdef set set_ab
+    cdef dict T,A,B
+    w_secs = int(round((60*60)/speed))
+    T = {'walk':{},'sit':{}}
+    i,j,s,w = start_i,start_i,start_i,start_i
+    while i<min(end_i,len(S)):
+        s_time,w_time = S[i,0]+sit,S[i,0]+walk
+        while j<len(S) and S[j,0]==S[i,0]: j += 1
+        s = j
+        while s<len(S) and S[s,0]<=s_time: s += 1
+        A,B = {},{}
+        for x in range(i,j,1):                      #all the stops encountered from time i=>j
+            if S[x,1] in A: A[S[x,1]] += [x]
+            else:           A[S[x,1]]  = [x]
+        for x in range(j,s,1):                      #all the stops encountered from time j=>s
+            if S[x,1] in B: B[S[x,1]] += [x]
+            else:           B[S[x,1]]  = [x]
+        for idx in A: #for the == pairs in A with 0 time diff
+            k = 1
+            for x in range(len(A[idx])):
+                a = A[idx][x]
+                for y in range(k,len(A[idx]),1):
+                    b = A[idx][y]
+                    if S[b,4]>=0: #trip off transfers to b when b is a terminal
+                        tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3])
+                        if tx in T['sit']: T['sit'][tx].add(ty+(0,))
+                        else:              T['sit'][tx] = set([ty+(0,)])
+                        if ty in T['sit']: T['sit'][ty].add(tx+(0,))
+                        else:              T['sit'][ty] = set([tx+(0,)])
+                k += 1
+        for idx in set(A).intersection(set(B)): #sids are prematched and x goes to y in time
+            for x in range(len(A[idx])):
+                a = A[idx][x]
+                for y in range(len(B[idx])):
+                    b = B[idx][y]
+                    if S[b,4]>=0:
+                        tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
+                        if tx in T['sit']: T['sit'][tx].add(ty)
+                        else:              T['sit'][tx] = set([ty])
+        if walk==sit: w = s
+        else:         w = j
+        while w<len(S) and S[w,0]<=w_time+s_time: w += 1  #w is 1 past walk buffer
+        for x in range(j,w,1):                      #all the stops encountered from time j=>w
+            if S[x,1] in B: B[S[x,1]] += [x]
+            else:           B[S[x,1]]  = [x]
+        #walking buffer---------------------------------------------------
+        B = {b:B[b] for b in set(B).difference(set(A))} #set of stops in B that are not in A
+        for idx_a in A: #check the NN of the stops in A with the stops in B
+            for idx_b in B:
+                w_dist = int(round(s_dist[idx_a,idx_b]*w_secs))
+                if w_dist<=walk: #time bound is secinds walking from a to b
+                    time_a = S[i,0]+w_dist
+                    for x in range(len(A[idx_a])):
+                        a = A[idx_a][x]
+                        for y in range(len(B[idx_b])): #get to the stop before it arrives and don't wait too long
+                            b = B[idx_b][y]
+                            if S[b,4]>=0 and time_a>=S[b,0] and time_a<=S[b,0]+sit: #can't be last stop
+                                tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
+                                if tx in T['walk']: T['walk'][tx].add(ty)
+                                else:               T['walk'][tx] = set([ty])
+        i = j
+    return T #T = {'sit':{(tid_a,tdx_a):[(tid_b,tdx_b,time_ab), ...], ...},'walk':{...}}
 
 @cython.boundscheck(False)
 @cython.nonecheck(False)

@@ -42,6 +42,10 @@ if args.cpus is not None:
     cpus = args.cpus
 else: cpus = mp.cpu_count()
 
+result_list = []
+def collect_results(result):
+    result_list.append(result)
+
 def mem_size(obj,unit='G'):
     if unit =='T':
         return round(sys.getsizeof(obj)/(1024*1024*1024*1024.0),2) #TB
@@ -138,7 +142,6 @@ def star(s,c):
                         s[c],cost = edit(s[j],s[c])
                         accum+=cost
     return s,accum
-
 #-------------------------------------
 
 #sequence distances-----------------------
@@ -199,42 +202,40 @@ def lcs(c1,c2,w=[1,0,0],s_pos=0):
             else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]    #top
     return [D[u%k][v],v,u]
 
-def shared_lcs(xys,ss,ls,s_dist,l_dist,lim=0.5,w=[1.0,0.0,0.0],pos=0):
-    k,l = 2,ss.shape[1] #longest sequence in ss is the actual dimension
-    D = np.zeros([k,l+1],dtype=np.float32) #reuse a circular DP table
-    for a in range(xys.shape[0]):
-        x,y = xys[a,:]
-        u,v = ls[x],ls[y]
-        l_dist[x][x][0] = l_dist[x][x][1] = l_dist[x][x][2] = u*w[0]
-        l_dist[y][y][0] = l_dist[y][y][1] = l_dist[y][y][2] = v*w[0]
-        D[:,:] = 0.0
-        if u<v: u,v,x,y = v,u,y,x
-        for i in range(1,u+1):
-            d1 = ss[x,i-1,pos]
-            for j in range(1,v+1):
-                d2 = ss[y,j-1,pos]
-                if s_dist[d1][d2]<=lim:            D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-s_dist[d1][d2]/lim)
-                elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]
-                else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]
-        l_dist[x][y][0] = l_dist[y][x][0] = D[(u+1)%k][v]
-        l_dist[x][y][1] = l_dist[y][x][1] = v*w[0]
-        l_dist[x][y][2] = l_dist[y][x][2] = u*w[0]
+#no return for shared memory version------------------------------------------------------------------------------------
 
 #part is the series of [i,j] index pairs into ss
-def parallel_lcs(xys):
+def parallel_lcs(xys): #returns [match,min_len,max_len]
     tu.shared_lcs(xys,ss,ls,s_dist,l_dist)
     return True
+
+def parallel_scan_trip_trans(params):
+    start,end,sit,walk,speed = params['start'],params['end'],params['sit'],params['walk'],params['speed']
+    T = tu.scan_trip_trans(S,start,end,s_dist,sit,walk,speed)
+    return [T]
 
 def jaccard_sim(c1,c2):
     C1,C2 = set(c1),set(c2)
     return [len(C1.intersection(C2)),len(C1.union(C2))]
 
+def time_overlap(xys,ss,ls):
+    P = []
+    for x,y in xys:
+        tx_a,tx_b = ss[x,:ls[x]][:,1][0],ss[x,:ls[x]][:,1][-1]
+        ty_a,ty_b = ss[y,:ls[y]][:,1][0],ss[y,:ls[y]][:,1][-1]
+        l = (tx_b-tx_a+1)+(ty_b-ty_a+1)                     #total lengths
+        u = min(l,max(tx_b,ty_b)-min(tx_a,ty_a)+1)  #total union area
+        i = 1.0*abs(tx_a-ty_a)+abs(tx_b-ty_b)
+        r = max(0.0,u-i)/u
+        if r>0.0: P += [[x,y]]
+    return P
 #---------------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
     print('starting to preprocess GTFS data folder = %s'%n_base)
     stops,stop_idx,s_names,s_dist = ru.read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
     v_dist         = ru.gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
+    v_dist = {}
     trips,trip_idx = ru.read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
     w_dist         = ru.read_walk_access(n_base,stop_idx,walk_buff=walk_buffer)
     calendar       = ru.read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
@@ -274,6 +275,42 @@ if __name__ == '__main__':
             temp = np.zeros((len(partitions[i]),2),dtype=np.int32)
             temp[:] = [k for k in partitions[i]]
             partitions[i] = temp
+        sp = {}
+        S = [[seqs[k][i][1],seqs[k][i][0],k,i,seqs[k][i][2]] for k in sorted(seqs) for i in range(len(seqs[k]))]
+        S = sorted(S,key=lambda x: (x[0],x[1]))
+        S = np.array(S,dtype=np.int32)
+        ts,x,y = {},0,0
+        for i in range(1,len(S),1):
+            y += 1
+            if S[i-1][0]<S[i][0]:
+                ts[i] = y-x
+                x = y
+        ps,x,y = [],0,0
+        for k in sorted(ts):
+            y += ts[k]
+            if y >= len(S)//cpus:
+                ps += [[x,k]]
+                x = k
+                y = 0
+        ps += [[x,len(S)]]
+        print('starting || cython trip transfers computation')
+        t_start = time.time()
+        p1 = mp.Pool(processes=cpus)
+        for i in range(len(ps)):
+            params = {'start':ps[i][0],'end':ps[i][1],'sit':600,'walk':600,'speed':3.0}
+            p1.apply_async(parallel_scan_trip_trans,args=(params,),callback=collect_results)
+        p1.close()
+        p1.join()
+        t_stop = time.time()
+        print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
+        T = {'sit':{},'walk':{}}
+        for result in result_list:
+            if len(result)>0:
+                for k in result[0]['sit']:
+                    T['sit'][k] = result[0]['sit'][k]
+                for k in result[0]['walk']:
+                    T['walk'][k] = result[0]['walk'][k]
+        result_list = []
         #fire it up---------------------------------------------------
         t_start = time.time()
         print('starting || computation')
@@ -285,7 +322,7 @@ if __name__ == '__main__':
         t_stop = time.time()
         print('ending || computation in %s sec'%round(t_stop-t_start,2))
         # || lcs in cython--------------------------------------------------------------------------
-        DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx}
+        DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
     else:
         for service_id in sorted(list(calendar.keys())):
             seqs,graph  = ru.read_gtfs_seqs(n_base,stop_idx,trips,trip_idx,calendar,service_id=service_id)
@@ -324,6 +361,42 @@ if __name__ == '__main__':
                 partitions = [np.zeros([len(xys),2],dtype=np.int32)]
                 for i in range(len(xys)):
                     partitions[0][i][:] = xys[i]
+            sp = {}
+            S = [[seqs[k][i][1],seqs[k][i][0],k,i,seqs[k][i][2]] for k in sorted(seqs) for i in range(len(seqs[k]))]
+            S = sorted(S,key=lambda x: (x[0],x[1]))
+            S = np.array(S,dtype=np.int32)
+            ts,x,y = {},0,0
+            for i in range(1,len(S),1):
+                y += 1
+                if S[i-1][0]<S[i][0]:
+                    ts[i] = y-x
+                    x = y
+            ps,x,y = [],0,0
+            for k in sorted(ts):
+                y += ts[k]
+                if y >= len(S)//cpus:
+                    ps += [[x,k]]
+                    x = k
+                    y = 0
+            ps += [[x,len(S)]]
+            print('starting || cython trip transfers computation')
+            t_start = time.time()
+            p1 = mp.Pool(processes=cpus)
+            for i in range(len(ps)):
+                params = {'start':ps[i][0],'end':ps[i][1],'sit':600,'walk':600,'speed':3.0}
+                p1.apply_async(parallel_scan_trip_trans,args=(params,),callback=collect_results)
+            p1.close()
+            p1.join()
+            t_stop = time.time()
+            print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
+            T = {'sit':{},'walk':{}}
+            for result in result_list:
+                if len(result)>0:
+                    for k in result[0]['sit']:
+                        T['sit'][k] = result[0]['sit'][k]
+                    for k in result[0]['walk']:
+                        T['walk'][k] = result[0]['walk'][k]
+            result_list = []
             #fire it up---------------------------------------------------
             t_start = time.time()
             print('starting || computation')
@@ -335,7 +408,7 @@ if __name__ == '__main__':
             t_stop = time.time()
             print('ending || computation in %s sec'%round(t_stop-t_start,2))
             # || lcs in cython--------------------------------------------------------------------------
-            DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx}
+            DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
     print('saving network data structures to disk (distance matrices, sequences and graph)')
     with gzip.GzipFile(out_dir+'/network.pickle.gz','wb') as f:
         pickle.dump(DATA,f)

@@ -273,37 +273,23 @@ stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_d
 trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
 service_ids = get_processed_service_ids(D)
 
-#pick a person trip from persons and experiment..persons[15]
-# t_start = time.time()
-# C,x = {},0
-# for i in persons:
-#     print('getting candidate o/d stop pairs for person=%s'%i)
-#     for j in range(len(persons[i])):
-#         candidates = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
-#         if candidates is not None:
-#             if i in C: C[i][j] = candidates
-#             else:      C[i] = {j:candidates}
-#         x += 1
-# t_stop = time.time()
-# print('searched %s person trip candidates in %s sec'%(x,round(t_stop-t_start,2)))
-
 i,j = 6,0
 person_trip = persons[6][1]
 C = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
-service_id = list(C.keys())[0]
-candidates = C[service_id]
+si = list(C.keys())[0]
+candidates = C[si]
 c_tid,c_tdx,d_stop,d_time = candidates[0][2],candidates[0][3],candidates[0][5][0],candidates[0][6]
 d_stops = set([])
 for c in candidates: d_stops.add(c[5][0])
-seqs,graph,l_dist,l_idx = D[service_id]['seqs'],D[service_id]['graph'],D[service_id]['l_dist'],D[service_id]['l_idx']
+seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
 c_stop,c_time = seqs[c_tid][c_tdx-1][0:2]
-
-t_start = time.time()
-buff_time,walk_speed,trans = 10,3,1
-
-counts = {-3:0,-2:0,-1:0,0:0,1:0}
-F = DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
-t_stop = time.time()
-print('starting_stop=%s, starting_time=%s'%(c_stop,c_time))
-print('destination stops=%s, time_limit=%s'%(d_stops,d_time))
-print('python search completed in %s secs'%round(t_stop-t_start,2))
+#
+# t_start = time.time()
+# buff_time,walk_speed,trans = 10,3,1
+#
+# counts = {-3:0,-2:0,-1:0,0:0,1:0}
+# F = DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
+# t_stop = time.time()
+# print('starting_stop=%s, starting_time=%s'%(c_stop,c_time))
+# print('destination stops=%s, time_limit=%s'%(d_stops,d_time))
+# print('python search completed in %s secs'%round(t_stop-t_start,2))

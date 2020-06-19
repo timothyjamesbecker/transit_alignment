@@ -26,7 +26,7 @@ def read_gtfs_stops(n_path,max_miles=0.5,NN=2):
     stops,s_names = [],{}
     for i in range(len(data)): #[id, x=lon,y=lat]
         sid = int(data[i][c_idx['stop_id']].split('_merged_')[0]) #these are ints...
-        stops += [[sid,[float(data[i][c_idx['stop_lon']]),float(data[i][c_idx['stop_lat']])],[]]]
+        stops += [[sid,[float(data[i][c_idx['stop_lon']]),float(data[i][c_idx['stop_lat']])],{}]]
         s_names[sid] = data[i][c_idx['stop_name']]
     stops = sorted(stops,key=lambda x: (x[1][0],x[1][1])) #spatial sort by lon,lat
     s_idx = {stops[i][0]:i for i in range(len(stops))}
@@ -40,10 +40,7 @@ def read_gtfs_stops(n_path,max_miles=0.5,NN=2):
     for i in range(dist.shape[0]):
         for j in range(dist.shape[1]):
             if i!=j:
-                if dist[i,j]<=max_miles:
-                    stops[i][NN] += [[j,dist[i,j]]]
-    for i in range(len(stops)): #will return NN < max_dist in sorted order
-        stops[i][NN] = sorted(stops[i][NN],key=lambda x: x[1])
+                if dist[i,j]<=max_miles: stops[i][NN][j] = dist[i,j]
     return stops,s_idx,s_names,dist
 
 #read the shape_dist_traveled calculations for each stop to stop link
