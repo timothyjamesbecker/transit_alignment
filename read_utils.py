@@ -75,6 +75,9 @@ def gtfs_stop_time_shape_dist(n_path,s_idx):
     print('calculated %s exact shape distance pairs in %s sec'%(len(E),round(stop-start,2)))
     return E
 
+def read_gtfs_shape(n_bas):
+    return True
+
 def read_gtfs_calendar(n_base):
     header,data = [],[]
     with open(n_base+'calendar.txt','r') as f:
@@ -96,7 +99,7 @@ def read_gtfs_calendar(n_base):
             else: C[data[i][0]] = data[i]
     return C
 
-def read_gtfs_trips(n_base):
+def read_gtfs_trips(n_base,merge='_merged_'):
     header,data = [],[]
     with open(n_base+'trips.txt', 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
@@ -104,14 +107,26 @@ def read_gtfs_trips(n_base):
     c_idx = {header[i]:i for i in range(len(header))}
     data = [row.rsplit(',') for row in raw[1:]]
     trips = []
-    for i in range(len(data)):
-        trip_id      = data[i][c_idx['trip_id']].split('_merged_')[0]
-        service_id   = data[i][c_idx['service_id']].split('_merged_')[0]
-        route_id     = data[i][c_idx['route_id']].split('_merged_')[0]
-        direction_id = int(data[i][c_idx['direction_id']])
-        trip_sign    = data[i][c_idx['trip_headsign']]
-        trips += [[trip_id,trip_sign,route_id,service_id,direction_id]]
-    t_idx = {trips[i][0]:i for i in range(len(trips))}
+    if merge is not None:
+        for i in range(len(data)):
+            trip_id      = data[i][c_idx['trip_id']].split('_merged_')[0]
+            service_id   = data[i][c_idx['service_id']].split('_merged_')[0]
+            route_id     = data[i][c_idx['route_id']].split('_merged_')[0]
+            direction_id = int(data[i][c_idx['direction_id']])
+            trip_sign    = data[i][c_idx['trip_headsign']]
+            shape_id     = data[i][c_idx['shape_id']].split('_merged_')[0]
+            trips += [[trip_id,trip_sign,route_id,service_id,direction_id,shape_id]]
+        t_idx = {trips[i][0]:i for i in range(len(trips))}
+    else:
+        for i in range(len(data)):
+            trip_id      = data[i][c_idx['trip_id']]
+            service_id   = data[i][c_idx['service_id']]
+            route_id     = data[i][c_idx['route_id']]
+            direction_id = int(data[i][c_idx['direction_id']])
+            trip_sign    = data[i][c_idx['trip_headsign']]
+            shape_id     = data[i][c_idx['shape_id']]
+            trips += [[trip_id,trip_sign,route_id,service_id,direction_id,shape_id]]
+        t_idx = {trips[i][0]:i for i in range(len(trips))}
     return trips,t_idx
 
 #search date string '5/26/2016' to service if using the calendar

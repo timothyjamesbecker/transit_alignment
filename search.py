@@ -214,17 +214,14 @@ def DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,
     c_stop,c_time,out_sdx,in_sdx = seqs[c_tid][c_tdx-1] #will be graph indexes for in and out links
     D,B,scores = [],[],[] #L is for prepending links, F is for managing returning branches that are collected
     if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exeeded time or number of transfers
-        counts[-3]+=1
         D = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
         return D
     else: #search using [(1)] direct [(2)] stoping [(3)] walking, followed by optimization [(4)]
         if seqs[c_tid][c_tdx][0] in d_stops:
             print('------- found stop=%s -------'%seqs[c_tid][c_tdx][0])
-            counts[1]+=1
             D =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
             return D
         elif c_tdx<len(seqs[c_tid])-1: #if c_tdx==len(seqs[c_tid] then it is the last stop...
-            counts[0]+=1
             D  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
             B += [D+DFS(c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)]#directs => depth first
         G,time_a,time_b = graph[c_stop]['out'],c_time,c_time+buff_time*60
@@ -232,7 +229,6 @@ def DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,
         for i in gidx:
             ws = G[i] #wait at the stop = ws
             if ws[2]!=c_tid and ws[3]+1<len(seqs[ws[2]])-1 and seqs[ws[2]][ws[3]][1]<d_time: #link end time-------------
-                counts[-1]+=1
                 D  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
                 B += [D+DFS(ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)] #recurse waiting
         w_secs = int(round((60*60)/walk_speed))
@@ -247,7 +243,6 @@ def DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,
                     wt = G[i] #don't want people getting on the same trip after walking...
                     if wt[2]!=c_tid and wt[3]+1<len(seqs[wt[2]]) and seqs[wt[2]][wt[3]][1]<d_time:
                         if wt[2]!=c_tid and seqs[wt[2]][wt[3]][1]<d_time: #trip end times are within the boundry--------
-                            counts[-2]+=1
                             D  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
                             D += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
                             B += [D+DFS(wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)]
@@ -283,7 +278,7 @@ d_stops = set([])
 for c in candidates: d_stops.add(c[5][0])
 seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
 c_stop,c_time = seqs[c_tid][c_tdx-1][0:2]
-#
+
 # t_start = time.time()
 # buff_time,walk_speed,trans = 10,3,1
 #

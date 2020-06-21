@@ -313,14 +313,14 @@ if __name__ == '__main__':
         result_list = []
         #fire it up---------------------------------------------------
         t_start = time.time()
-        print('starting || computation')
+        print('starting || cython lcs computation')
         p1 = mp.Pool(processes=cpus)
         for i in range(len(partitions)):
             p1.apply_async(parallel_lcs,args=(partitions[i],))
         p1.close()
         p1.join()
         t_stop = time.time()
-        print('ending || computation in %s sec'%round(t_stop-t_start,2))
+        print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
         # || lcs in cython--------------------------------------------------------------------------
         DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
     else:
@@ -399,14 +399,14 @@ if __name__ == '__main__':
             result_list = []
             #fire it up---------------------------------------------------
             t_start = time.time()
-            print('starting || computation')
+            print('starting || cython lcs computation')
             p1 = mp.Pool(processes=cpus)
             for i in range(len(partitions)):
                 p1.apply_async(parallel_lcs,args=(partitions[i],))
             p1.close()
             p1.join()
             t_stop = time.time()
-            print('ending || computation in %s sec'%round(t_stop-t_start,2))
+            print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
             # || lcs in cython--------------------------------------------------------------------------
             DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
     print('saving network data structures to disk (distance matrices, sequences and graph)')
