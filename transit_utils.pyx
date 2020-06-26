@@ -20,7 +20,7 @@ def lcs(int[:,:] c1, int[:,:] c2, float[:,:] dist, float lim=0.5,list w=[1.0,0.0
             if dist[c1[i-1,pos]][c2[j-1,pos]]<=lim: D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[c1[i-1,pos]][c2[j-1,pos]]/lim)
             elif D[i%k][j-1] >= D[(i-1)%k][j]:      D[i%k][j] = D[i%k][j-1]+w[1]
             else:                                   D[i%k][j] = D[(i-1)%k][j]+w[2]
-    return [D[(u+1)%k][v],v,u]
+    return [D[u%k][v],v,u]
 
 @cython.boundscheck(False)
 @cython.nonecheck(False)
@@ -128,6 +128,24 @@ def pairwise_rectangular(list stops, double max_dist=120.0, int lon=0, int lat=1
 @cython.boundscheck(False)
 @cython.nonecheck(False)
 @cython.wraparound(False)
+def sdist_seq_trend(int [:,:] ss, float [:,:] s_dist, int tdx, int sid, int time_max):
+    cdef int i,edx,min_idx,delta_time
+    cdef float min_val,delta_dist
+    edx = tdx
+    while edx<len(ss) and ss[edx][1]<=time_max: edx += 1
+    if edx>tdx:
+        min_val = np.finfo(np.float32).max
+        for i in range(tdx,edx,1):
+            if s_dist[ss[i][0],sid]<min_val:
+                min_val,min_idx = s_dist[ss[i][0],sid],i
+        delta_dist = s_dist[ss[tdx][0],sid]-min_val
+        delta_time = ss[min_idx][1]-ss[tdx][1]+1
+    else: delta_dist,delta_time = 0.0,1
+    return (60*60)*delta_dist/delta_time
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
 def shape_dist_correction(list stops, dict E, int NN=2, float max_nn=0.25, verbose=True):
     cdef int a,b,i,j,m,x,y
     cdef bint one_link,two_link
@@ -185,7 +203,7 @@ def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
     cdef set set_ab
     cdef dict T,A,B
     w_secs = int(round((60*60)/speed))
-    T = {'walk':{},'sit':{}}
+    T = {}
     i,j,s,w = start_i,start_i,start_i,start_i
     while i<min(end_i,len(S)):
         s_time,w_time = S[i,0]+sit,S[i,0]+walk
@@ -207,10 +225,10 @@ def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
                     b = A[idx][y]
                     if S[b,4]>=0: #trip off transfers to b when b is a terminal
                         tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3])
-                        if tx in T['sit']: T['sit'][tx].add(ty+(0,))
-                        else:              T['sit'][tx] = set([ty+(0,)])
-                        if ty in T['sit']: T['sit'][ty].add(tx+(0,))
-                        else:              T['sit'][ty] = set([tx+(0,)])
+                        if tx in T: T[tx].add(ty+(-1,0))
+                        else:       T[tx] = set([ty+(-1,0)])
+                        if ty in T: T[ty].add(tx+(-1,0))
+                        else:       T[ty] = set([tx+(-1,0)])
                 k += 1
         for idx in set(A).intersection(set(B)): #sids are prematched and x goes to y in time
             for x in range(len(A[idx])):
@@ -218,13 +236,13 @@ def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
                 for y in range(len(B[idx])):
                     b = B[idx][y]
                     if S[b,4]>=0:
-                        tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
-                        if tx in T['sit']: T['sit'][tx].add(ty)
-                        else:              T['sit'][tx] = set([ty])
+                        tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],-1,S[b,0]-S[i,0])
+                        if tx in T: T[tx].add(ty)
+                        else:       T[tx] = set([ty])
         if walk==sit: w = s
         else:         w = j
-        while w<len(S) and S[w,0]<=w_time+s_time: w += 1  #w is 1 past walk buffer
-        for x in range(j,w,1):                      #all the stops encountered from time j=>w
+        while w<len(S) and S[w,0]<=w_time+sit: w += 1  #w is 1 past walk buffer
+        for x in range(j,w,1):                         #all the stops encountered from time j=>w
             if S[x,1] in B: B[S[x,1]] += [x]
             else:           B[S[x,1]]  = [x]
         #walking buffer---------------------------------------------------
@@ -232,66 +250,182 @@ def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
         for idx_a in A: #check the NN of the stops in A with the stops in B
             for idx_b in B:
                 w_dist = int(round(s_dist[idx_a,idx_b]*w_secs))
-                if w_dist<=walk: #time bound is secinds walking from a to b
+                if w_dist<=walk: #time bound is seconds walking from a to b
                     time_a = S[i,0]+w_dist
                     for x in range(len(A[idx_a])):
                         a = A[idx_a][x]
-                        for y in range(len(B[idx_b])): #get to the stop before it arrives and don't wait too long
-                            b = B[idx_b][y]
-                            if S[b,4]>=0 and time_a>=S[b,0] and time_a<=S[b,0]+sit: #can't be last stop
-                                tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
-                                if tx in T['walk']: T['walk'][tx].add(ty)
-                                else:               T['walk'][tx] = set([ty])
+                        if S[a,3]>=0: #don't allow walking transfers from the first stop
+                            for y in range(len(B[idx_b])): #get to the stop before it arrives and don't wait too long
+                                b = B[idx_b][y]                          #don't allow a transfer to a last stop
+                                if S[b,4]>=0 and S[b,0]>=time_a and S[b,0]<=time_a+sit: #S[b,4]=-1 => last stop
+                                    tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],-2,S[b,0]-S[i,0])
+                                    if tx in T: T[tx].add(ty)
+                                    else:       T[tx] = set([ty])
         i = j
     return T #T = {'sit':{(tid_a,tdx_a):[(tid_b,tdx_b,time_ab), ...], ...},'walk':{...}}
+
+# @cython.boundscheck(False)
+# @cython.nonecheck(False)
+# @cython.wraparound(False)
+# def scan_trip_trans(int[:,:] S, int start_i, int end_i, float[:,:] s_dist,
+#                     int sit=10*60, int walk=10*60, float speed=3.0):
+#     cdef int a,b,i,j,k,x,y,s,w,s_time,w_time,w_secs,w_dist,idx,idx_a,idx_b
+#     cdef tuple tx,ty
+#     cdef set set_ab
+#     cdef dict T,A,B
+#     w_secs = int(round((60*60)/speed))
+#     T = {'sit':{},'walk':{}}
+#     i,j,s,w = start_i,start_i,start_i,start_i
+#     while i<min(end_i,len(S)):
+#         s_time,w_time = S[i,0]+sit,S[i,0]+walk
+#         while j<len(S) and S[j,0]==S[i,0]: j += 1
+#         s = j
+#         while s<len(S) and S[s,0]<=s_time: s += 1
+#         A,B = {},{}
+#         for x in range(i,j,1):                      #all the stops encountered from time i=>j
+#             if S[x,1] in A: A[S[x,1]] += [x]
+#             else:           A[S[x,1]]  = [x]
+#         for x in range(j,s,1):                      #all the stops encountered from time j=>s
+#             if S[x,1] in B: B[S[x,1]] += [x]
+#             else:           B[S[x,1]]  = [x]
+#         for idx in A: #for the == pairs in A with 0 time diff
+#             k = 1
+#             for x in range(len(A[idx])):
+#                 a = A[idx][x]
+#                 for y in range(k,len(A[idx]),1):
+#                     b = A[idx][y]
+#                     if S[b,4]>=0: #trip off transfers to b when b is a terminal
+#                         tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3])
+#                         if tx in T['sit']: T['sit'][tx].add(ty+(0,))
+#                         else:              T['sit'][tx] = set([ty+(0,)])
+#                         if ty in T['sit']: T['sit'][ty].add(tx+(0,))
+#                         else:              T['sit'][ty] = set([tx+(0,)])
+#                 k += 1
+#         for idx in set(A).intersection(set(B)): #sids are prematched and x goes to y in time
+#             for x in range(len(A[idx])):
+#                 a = A[idx][x]
+#                 for y in range(len(B[idx])):
+#                     b = B[idx][y]
+#                     if S[b,4]>=0:
+#                         tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
+#                         if tx in T['sit']: T['sit'][tx].add(ty)
+#                         else:              T['sit'][tx] = set([ty])
+#         if walk==sit: w = s
+#         else:         w = j
+#         while w<len(S) and S[w,0]<=w_time+s_time: w += 1  #w is 1 past walk buffer
+#         for x in range(j,w,1):                      #all the stops encountered from time j=>w
+#             if S[x,1] in B: B[S[x,1]] += [x]
+#             else:           B[S[x,1]]  = [x]
+#         #walking buffer---------------------------------------------------
+#         B = {b:B[b] for b in set(B).difference(set(A))} #set of stops in B that are not in A
+#         for idx_a in A: #check the NN of the stops in A with the stops in B
+#             for idx_b in B:
+#                 w_dist = int(round(s_dist[idx_a,idx_b]*w_secs))
+#                 if w_dist<=walk: #time bound is secinds walking from a to b
+#                     time_a = S[i,0]+w_dist
+#                     for x in range(len(A[idx_a])):
+#                         a = A[idx_a][x]
+#                         for y in range(len(B[idx_b])): #get to the stop before it arrives and don't wait too long
+#                             b = B[idx_b][y]
+#                             if S[b,4]>=0 and time_a>=S[b,0] and time_a<=S[b,0]+sit: #can't be last stop
+#                                 tx,ty = (S[a,2],S[a,3]),(S[b,2],S[b,3],S[b,0]-S[i,0])
+#                                 if tx in T['walk']: T['walk'][tx].add(ty)
+#                                 else:               T['walk'][tx] = set([ty])
+#         i = j
+#     return T #T = {'sit':{(tid_a,tdx_a):[(tid_b,tdx_b,time_ab), ...], ...},'walk':{...}}
 
 @cython.boundscheck(False)
 @cython.nonecheck(False)
 @cython.wraparound(False)
-def DFS(int c_tid, int c_tdx, set d_stops, int d_time, list stops, dict seqs, dict graph, float[:,:] s_dist, float[:,:,:] l_dist,
-        int trans=5,int buff_time=10, int walk_speed=3, list pw=[0,10,20], bint verbose=False):
-    cdef int i,j,c_stop,c_time,out_sdx,in_sdx,w_secs,wt_stop,time_a,time_b
-    cdef list D,B,gidx,scores
-    cdef np.ndarray G,ws,wt
-    c_stop,c_time,out_sdx,in_sdx = seqs[c_tid][c_tdx-1] #will be graph indexes for in and out links
-    D,B,scores = [],[],[] #L is for prepending links, F is for managing returning branches that are collected
-    if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exheded time or number of transfers
-        D = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-        return D
-    else: #search using [(1)] direct [(2)] stoping [(3)] walking, followed by optimization [(4)]
-        if seqs[c_tid][c_tdx][0] in d_stops:
-            D =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-            return D
-        elif c_tdx<len(seqs[c_tid])-1: #if c_tdx==len(seqs[c_tid] then it is the last stop...
-            D  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-            B += [D+DFS(c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)]#directs => depth first
-        G,time_a,time_b = graph[c_stop]['out'],c_time,c_time+buff_time*60
-        gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
-        for i in gidx:
-            ws = G[i] #wait at the stop = ws
-            if ws[2]!=c_tid and ws[3]+1<len(seqs[ws[2]])-1 and seqs[ws[2]][ws[3]][1]<d_time: #link end time-------------
-                D  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
-                B += [D+DFS(ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)] #recurse waiting
-        w_secs = int(round((60*60)/walk_speed))
-        for j in range(len(stops[c_stop][2])):
-            wt_stop = stops[c_stop][2][j][0]                        #found a walking stop
-            time_a  = int(c_time+stops[c_stop][2][j][1]*w_secs+0.5) #time once you get to the stop
-            time_b  = int(min(d_time,time_a+buff_time*60))          #waiting time after you get to the stop
-            if time_a<d_time and wt_stop in graph: #past max time from the walk time period
-                G     = graph[wt_stop]['out']
-                gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
-                for i in gidx:
-                    wt = G[i] #don't want people getting on the same trip after walking...
-                    if wt[2]!=c_tid and wt[3]+1<len(seqs[wt[2]]) and seqs[wt[2]][wt[3]][1]<d_time:
-                        if wt[2]!=c_tid and seqs[wt[2]][wt[3]][1]<d_time: #trip end times are within the boundry--------
-                            D  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
-                            D += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
-                            B += [D+DFS(wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)]
-    if len(B)>0: #[(4)] optimize/filter the returned paths (some were pruned via time/transfer limits:::::::::::::::::::
-        for i in range(len(B)):
-            if len(B[i])>0 and B[i][len(B[i])-1][2] in d_stops: #need to have a trip that ends at one of the d_stops
-                scores += [[sum([B[i][j][4] for j in range(len(B[i]))]),i]]
-        if len(scores)>0: #found a valid trip
-            return B[sorted(scores)[0][1]]
-        else: return []
-    else: return []
+cdef list sub_seq_leg(dict seqs, int tid, int tdx, int sid, dict pw={0:0,-1:10*60,-2:20*60}):
+    cdef a,i,j
+    cdef list L = []
+    i = -1
+    for a in range(tdx,len(seqs[tid]),1):
+        if seqs[tid][a][0]==sid: i = a; break
+    if i>=0:
+        L = [[tid,j,seqs[tid][j][0],seqs[tid][j][1],pw[0]] for j in range(tdx,i+1,1)]
+    return L
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
+cdef list sample_branches(dict T, dict seqs,tuple s,float p=1.0):
+    cdef a,b
+    cdef tuple k,t
+    cdef list B = []
+    cdef list b_idx
+    cdef set C = set([])
+    cdef dict A = {}
+    for a in range(s[1]+1,len(seqs[s[0]]),1): #can't do a transfer from a transfer
+        if (s[0],a) in T:
+            for t in T[(s[0],a)]:
+                if t[0:3] not in A or t[3]<A[t[0:3]][0]:
+                    A[t[0:3]] = [t[3],a]
+    for k in A: C.add((A[k][1],k+(A[k][0],)))
+    if len(C)>1:
+        b_idx = list(np.random.choice(range(len(C)),max(1,int(len(C)*p)),replace=False))
+        B = list(C)
+        B = sorted([B[b] for b in b_idx])
+    return B
+
+@cython.boundscheck(False)
+@cython.nonecheck(False)
+@cython.wraparound(False)
+def RTS_FULL(list C,dict T,dict F,dict seqs,dict pw={0:0,-1:10*60,-2:20*60},int t_max=4,list t_p=[1.0,1.0,1.0,1.0]):
+    cdef int sid,a1,a2,a3,a4
+    cdef tuple s0,s1,s2,s3,s4
+    cdef list L
+    cdef np.ndarray Y
+    cdef dict X = {i:{} for i in range(t_max+1)}
+    for i in range(len(C)):
+        s0,sid = (C[i][0],C[i][1]),C[i][2]
+        if s0[0:2] in F and sid in F[s0[0:2]]:
+            L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
+            Y  = np.array(L,dtype=np.int32)
+            X[0][tuple(Y[:,2])] = Y
+        elif len(X[0])<1 and t_max>0: #will get up to 1-transfer more than optimal
+            for a1,s1 in sample_branches(T,seqs,s0,p=t_p[0]): #a1 is the last stop before transfer-1
+                if s1[0:2] in F and sid in F[s1[0:2]]:
+                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                    L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
+                    Y  = np.array(L,dtype=np.int32)                                         #np array
+                    X[1][tuple(Y[:,2])] = Y
+                elif len(X[1])<1 and t_max>1:
+                    for a2,s2 in sample_branches(T,seqs,s1,p=t_p[1]): #a2 is the last stop before transfer-2
+                        if s2[0:2] in F and sid in F[s2[0:2]]:
+                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                            L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
+                            Y  = np.array(L,dtype=np.int32)                                         #np array
+                            X[2][tuple(Y[:,2])] = Y
+                        elif len(X[2])<1 and t_max>2: #if len(X[1])<1
+                            for a3,s3 in sample_branches(T,seqs,s2,p=t_p[2]):
+                                if s3[0:2] in F and sid in F[s3[0:2]]:
+                                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                    L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                    L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                    L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
+                                    Y  = np.array(L,dtype=np.int32)                                         #np array
+                                    X[3][tuple(Y[:,2])] = Y
+                                elif len(X[3])<1 and t_max>3: #if len(X[2])<1
+                                    for a4,s4 in sample_branches(T,seqs,s3,p=t_p[3]):
+                                        if s4[0:2] in F and sid in F[s4[0:2]]:
+                                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                            L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                            L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
+                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                            L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
+                                            Y  = np.array(L,dtype=np.int32)                                         #np array
+                                            X[4][tuple(Y[:,2])] = Y
+    return X

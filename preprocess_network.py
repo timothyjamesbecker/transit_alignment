@@ -191,16 +191,16 @@ def edit_sim(c1,c2,w=[0,1,1]): #[m,d,i,s]
                     D[i][j%k] = z   #substitute
     return [u-D[u][v%k],u]
 
-def lcs(c1,c2,w=[1,0,0],s_pos=0):
-    u,v,k, = len(c1),len(c2),2
+def lcs(c1,c2,dist,lim=0.5,w=[1.0,0.0,0.0],pos=0):
+    k,u,v = 2,len(c1),len(c2)
     if u<v: u,v,c1,c2 = v,u,c2,c1
-    D = np.zeros((k,v+1),dtype=int)
-    for i in range(1,u+1):      #rows--------------
-        for j in range(1,v+1):  #columns-----------
-            if c1[i-1,s_pos]==c2[j-1,s_pos]:   D[i%k][j] = D[(i-1)%k][j-1]+w[0]  #diagnal
-            elif D[i%k][j-1] >= D[(i-1)%k][j]: D[i%k][j] = D[i%k][j-1]+w[1]      #left
-            else:                              D[i%k][j] = D[(i-1)%k][j]+w[2]    #top
-    return [D[u%k][v],v,u]
+    D = np.zeros([k,v+1],dtype=np.float32)
+    for i in range(1,u+1):
+        for j in range(1,v+1):
+            if dist[c1[i-1,pos]][c2[j-1,pos]]<=lim: D[i%k][j] = D[(i-1)%k][j-1]+w[0]*(1.0-dist[c1[i-1,pos]][c2[j-1,pos]]/lim)
+            elif D[i%k][j-1] >= D[(i-1)%k][j]:      D[i%k][j] = D[i%k][j-1]+w[1]
+            else:                                   D[i%k][j] = D[(i-1)%k][j]+w[2]
+    return [D[u%k][v],1.0*v,1.0*u]
 
 #no return for shared memory version------------------------------------------------------------------------------------
 
@@ -389,13 +389,11 @@ if __name__ == '__main__':
             p1.join()
             t_stop = time.time()
             print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
-            T = {'sit':{},'walk':{}}
+            T = {}
             for result in result_list:
                 if len(result)>0:
-                    for k in result[0]['sit']:
-                        T['sit'][k] = result[0]['sit'][k]
-                    for k in result[0]['walk']:
-                        T['walk'][k] = result[0]['walk'][k]
+                    for k in result[0]:
+                        T[k] = result[0][k]
             result_list = []
             #fire it up---------------------------------------------------
             t_start = time.time()

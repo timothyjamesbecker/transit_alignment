@@ -8,6 +8,7 @@ import pickle
 import subprocess
 import numpy as np
 import itertools as it
+import multiprocessing as mp
 import transit_utils as tu
 import read_utils as ru
 
@@ -98,7 +99,9 @@ def load_network_data(n_base,walk=0.5,search_date=None,search_time=[0,115200]):
             print('preprocessing in %s sec'%round(t_stop-t_start,2))
             with gzip.GzipFile(glob.glob(n_base+'/network.pickle.gz')[0],'rb') as f:
                 D = pickle.load(f)
-        except Exception as E: pass
+        except Exception as E:
+            print(E)
+            pass
     return D
 
 def get_datetime(person_trip):
@@ -260,6 +263,203 @@ def path_time_score(trip,c_time):
     if len(trip)>0:
         return sum([trip[i][4] for i in range(len(trip))])
 
+def reduce_trans(trans,pw={-1:10*60,-2:20*60}):
+    T = {}
+    for t in trans:
+        T[t] = {}
+        for k in trans[t]:
+            if k[0] not in T[t]:
+                T[t][k[0]] = k[1:4]
+            elif pw[T[t][k[0]][1]]+T[t][k[0]][2]>pw[k[2]]+k[3]:
+                T[t][k[0]] = k[1:4]
+    T = {t:set([(k,)+tuple(T[t][k]) for k in T[t]]) for t in T}
+    return T
+
+def sub_seq_leg(seqs,tid,tdx,sid,pw):
+    i,L = -1,[]
+    for a in range(tdx,len(seqs[tid]),1):
+        if seqs[tid][a][0]==sid: i = a; break
+    if i>=0:
+        L = [[tid,j,seqs[tid][j][0],seqs[tid][j][1],pw[0]] for j in range(tdx,i+1,1)]
+    return L
+
+#randomly sample the branches encountered in T
+def sample_branches(T,seqs,s,p=1.0):
+    A,B = {},set([])
+    for a in range(s[1]+1,len(seqs[s[0]]),1): #can't do a transfer from a transfer
+        if (s[0],a) in T:
+            for t in T[(s[0],a)]:
+                if t[0:3] not in A or t[3]<A[t[0:3]][0]:
+                    A[t[0:3]] = [t[3],a]
+    for k in A: B.add((A[k][1],k+(A[k][0],)))
+    # if p>=1.0: B = sorted(list(B))
+    if len(B)>1:
+        b_idx = sorted(np.random.choice(range(len(B)),max(1,int(len(B)*p)),replace=False))
+        B = list(B)
+        B = sorted([B[b] for b in b_idx])
+    return B
+
+#given L: a batch of paths, update K LCS dissimiliar paths
+def update_paths(K,D,S,L,s_dist,k=5):
+    tm,m = (L[len(L)-1][3]-L[0][3])+np.sum(L[:,4]),-1 #m truggers recalculations if best time, or max diss is reached
+    if len(K)<k:
+        K += [[tm,L]]
+        m = len(K)-1
+    else:
+        if tm<K[0][0]:
+            K = [[tm,L]]+K[:-1] #pop off the last in the sorted list
+            m = 0
+        else:
+            C,sp = [],0.0
+            for i in range(k):
+                l = tu.lcs(L[:,2:],K[i][1][:,2:],s_dist)
+                if l[1]>0 and l[2]>0: C += [1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))]
+                sp += C[i]
+            for i in range(1,len(S),1):
+                if sp>S[i]: m = i
+            if m>0: K = K[:m]+[[tm,L]]+K[m+1:]
+    K = sorted(K,key=lambda x: x[0])
+    if m>=0: #some change----------------------------------------------------------------------------------------
+        D = {}
+        for i,j in it.combinations(range(len(K)),2):
+            if i not in D: D[i] = {}
+            if j not in D: D[j] = {}
+            l = tu.lcs(K[i][1][:,2:],K[j][1][:,2:],s_dist)
+            if l[1]>0 and l[2]>0: D[i][j] = D[j][i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
+            else:                 D[i][j] = D[j][i] = 1.0
+        for k in D: S[k] = sum([D[k][x] for x in D[k]])
+    return K,D,S
+
+# random tree search algorithm: RTS for K dissimiliar short paths (RKDSP)
+# tid,tdx is the trip at a stop, sid is the destination
+# T+F,seqs,pw are the tree,fwd_stops,seq and penalties
+def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.25]):
+    start = time.time()
+    K,D,S = {i:[] for i in range(t_max+1)},{i:{} for i in range(t_max+1)},{i:{} for i in range(t_max+1)}
+    for c in C:
+        s0,sid = (c[2],c[3]),c[5][0]
+        if sid in F[s0[0:2]]:
+            L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
+            L  = np.array(L,dtype=np.int32)
+            K[0],D[0],S[0] = update_paths(K[0],D[0],S[0],L,s_dist,k=k_dis)
+        elif t_max>0: #gather transfer branches from tid,tdx
+            for a1,s1 in sample_branches(T,seqs,s0,p=t_p[0]): #a1 is the last stop before transfer-1
+                if sid in F[s1[0:2]]:
+                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                    L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
+                    L  = np.array(L,dtype=np.int32)                                         #np array
+                    K[1],D[1],S[1] = update_paths(K[1],D[1],S[1],L,s_dist,k=k_dis)   #filter these paths
+                elif t_max>1:
+                    for a2,s2 in sample_branches(T,seqs,s1,p=t_p[1]): #a2 is the last stop before transfer-2
+                        if sid in F[s2[0:2]]:
+                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                            L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
+                            L  = np.array(L,dtype=np.int32)                                         #np array
+                            K[2],D[2],S[2] = update_paths(K[2],D[2],S[2],L,s_dist,k=k_dis)   #filter these paths
+                        elif t_max>2:
+                            for a3,s3 in sample_branches(T,seqs,s2,p=t_p[2]):
+                                if sid in F[s3[0:2]]:
+                                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                    L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                    L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                    L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
+                                    L  = np.array(L,dtype=np.int32)                                         #np array
+                                    K[3],D[3],S[3] = update_paths(K[3],D[3],S[3],L,s_dist,k=k_dis)
+                                elif t_max>3:
+                                    for a4,s4 in sample_branches(T,seqs,s3,p=t_p[3]):
+                                        if sid in F[s4[0:2]]:
+                                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                            L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                            L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
+                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                            L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
+                                            L  = np.array(L,dtype=np.int32)                                         #np array
+                                            K[4],D[4],S[4] = update_paths(K[4],D[4],S[4],L,s_dist,k=k_dis)
+    stop = time.time()
+    print('searched for max_trans=%s in %s sec'%(t_max,round(stop-start,2)))
+    return K,D,S
+
+def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=4,t_p=[1.0,1.0,1.0,1.0]):
+    X = {i:{} for i in range(t_max+1)}
+    for i in range(len(C)):
+        s0,sid = (C[i][0],C[i][1]),C[i][2]
+        if s0[0:2] in F and sid in F[s0[0:2]]:
+            L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
+            Y  = np.array(L,dtype=np.int32)
+            X[0][tuple(Y[:,2])] = Y
+        elif len(X[0])<1 and t_max>0: #will get up to 1-transfer more than optimal
+            for a1,s1 in sample_branches(T,seqs,s0,p=t_p[0]): #a1 is the last stop before transfer-1
+                if s1[0:2] in F and sid in F[s1[0:2]]:
+                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                    L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
+                    Y  = np.array(L,dtype=np.int32)                                         #np array
+                    X[1][tuple(Y[:,2])] = Y
+                elif len(X[1])<1 and t_max>1:
+                    for a2,s2 in sample_branches(T,seqs,s1,p=t_p[1]): #a2 is the last stop before transfer-2
+                        if s2[0:2] in F and sid in F[s2[0:2]]:
+                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                            L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
+                            Y  = np.array(L,dtype=np.int32)                                         #np array
+                            X[2][tuple(Y[:,2])] = Y
+                        elif len(X[2])<1 and t_max>2: #if len(X[1])<1
+                            for a3,s3 in sample_branches(T,seqs,s2,p=t_p[2]):
+                                if s3[0:2] in F and sid in F[s3[0:2]]:
+                                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                    L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                    L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                    L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
+                                    Y  = np.array(L,dtype=np.int32)                                         #np array
+                                    X[3][tuple(Y[:,2])] = Y
+                                elif len(X[3])<1 and t_max>3: #if len(X[2])<1
+                                    for a4,s4 in sample_branches(T,seqs,s3,p=t_p[3]):
+                                        if s4[0:2] in F and sid in F[s4[0:2]]:
+                                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                            L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                            L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
+                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                            L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
+                                            Y  = np.array(L,dtype=np.int32)                                         #np array
+                                            X[4][tuple(Y[:,2])] = Y
+    return X
+
+result_list = []
+def collect_results(result):
+    result_list.append(result)
+
+def get_seq_paths(C,seqs,trans): #can write recursively too...
+    T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
+    for (tid,tdx) in T:
+        for l in T[(tid,tdx)]:
+            if (l[0],l[1]) not in F: #tid,tdx
+                F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
+    start = time.time()
+    X    = tu.RTS_FULL(C,T,F,seqs,t_max=4,t_p=[1.0,1.0,0.5,0.25])
+    stop = time.time()
+    print('python RTS in %s sec, paths by transfer=%s'%(round(stop-start,2),[len(X[x]) for x in X]))
+    return X
+
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['7:00','8:30']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
@@ -268,23 +468,54 @@ stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_d
 trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
 service_ids = get_processed_service_ids(D)
 
-i,j = 6,0
-person_trip = persons[6][1]
-C = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
-si = list(C.keys())[0]
-candidates = C[si]
-c_tid,c_tdx,d_stop,d_time = candidates[0][2],candidates[0][3],candidates[0][5][0],candidates[0][6]
-d_stops = set([])
-for c in candidates: d_stops.add(c[5][0])
-seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-c_stop,c_time = seqs[c_tid][c_tdx-1][0:2]
+C,X,each_person = {},{},True
+for i in sorted(persons):
+    for j in range(len(persons[i])):
+        can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
+        if can is not None and len(can[sorted(can)[0]]):
+            print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+            si = list(can.keys())[0]
+            candidates = can[si]
+            if not each_person:
+                for c in candidates:
+                    k = (c[2],c[3],c[5][0])
+                    if si in C:
+                        if k in C[si]: C[si][k] += [(i,j)]
+                        else:          C[si][k]  = [(i,j)]
+                    else:              C[si] =  {k:[(i,j)]}
+            else:
+                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+                K = [[c[2],c[3],c[5][0]] for c in candidates]
+                if i in X: X[i][i] = get_seq_paths(K,seqs,trans)
+                else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
+print('%s unique service_ids to search'%len(C))
 
-# t_start = time.time()
-# buff_time,walk_speed,trans = 10,3,1
-#
-# counts = {-3:0,-2:0,-1:0,0:0,1:0}
-# F = DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)
-# t_stop = time.time()
-# print('starting_stop=%s, starting_time=%s'%(c_stop,c_time))
-# print('destination stops=%s, time_limit=%s'%(d_stops,d_time))
-# print('python search completed in %s secs'%round(t_stop-t_start,2))
+if not each_person: #pools the unique search possibilities....
+    for si in sorted(C):
+        print('processing %s'%si)
+        seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+        cpus,ks = mp.cpu_count(),sorted(C[si])
+        partitions,n = [],len(ks)//cpus
+        for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
+        if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
+        # get_seq_paths(partitions[0],seqs,trans)
+        # get_seq_paths(partitions[1],seqs,trans)
+        # get_seq_paths(partitions[2],seqs,trans)
+        # get_seq_paths(partitions[3],seqs,trans)
+        print('starting || cython random tree search (RTS) computation')
+        t_start = time.time()
+        p1 = mp.Pool(processes=cpus)
+        for i in range(len(partitions)):
+            p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
+        p1.close()
+        p1.join()
+        t_stop = time.time()
+        X = {}
+        for result in result_list:
+            for i in result:
+                if i in X:
+                    for j in result[i]: X[i][j] = result[i][j]
+                else:
+                    X[i] = {}
+                    for j in result[i]: X[i][j] = result[i][j]
+    #now you have to dig out each persons search to match up results
