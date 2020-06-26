@@ -468,7 +468,7 @@ stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_d
 trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
 service_ids = get_processed_service_ids(D)
 
-C,X,each_person = {},{},True
+C,X,each_person = {},{},False
 for i in sorted(persons):
     for j in range(len(persons[i])):
         can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
@@ -486,7 +486,7 @@ for i in sorted(persons):
             else:
                 seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
                 K = [[c[2],c[3],c[5][0]] for c in candidates]
-                if i in X: X[i][i] = get_seq_paths(K,seqs,trans)
+                if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
                 else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
 print('%s unique service_ids to search'%len(C))
 
