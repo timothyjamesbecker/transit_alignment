@@ -127,7 +127,7 @@ def get_search_time(base_time,buff_time=10,symetric=True):
     return search_time
 
 #buff_time is in minutes, walking speed is in mi/hour, start with forwar search only...
-def start_od_search(person_trip,w_dist,s_dist,v_dist,buff_time=10,walk_speed=3,bus_speed=12):
+def start_od_search(person_trip,w_dist,s_dist,v_dist,buff_time=10,max_time=90,walk_speed=3,bus_speed=12):
     w_secs = (60.0*60.0)/walk_speed #seconds/mi
     dt = get_datetime(person_trip)
     search_time = get_search_time(dt[1][0],buff_time=buff_time*60)
@@ -155,7 +155,7 @@ def start_od_search(person_trip,w_dist,s_dist,v_dist,buff_time=10,walk_speed=3,b
                     time_upper = dt[1][0]+int(round(60.0*(60.0/walk_speed)*(wods['o'][o]+wods['d'][d])))+\
                         int(round(60.0*(60.0/bus_speed)*(2.0*s_dist[o,d])))
                 else:
-                    time_upper = dt[1][0]+75*60
+                    time_upper = dt[1][0]+max_time*60 #90 minute upper bound
                 #::: TIME UPPER BOUND :::-------------------------------------------------
                 od_search += [[(o,d),sw_dist,time_upper]]
         od_search = sorted(od_search,key=lambda x: x[2])
@@ -170,7 +170,7 @@ def start_od_search(person_trip,w_dist,s_dist,v_dist,buff_time=10,walk_speed=3,b
                 if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                     tid = graph[o]['out'][i][2:]
                     candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
-                    candidate_trips  += [candidate_trip+[sdist_trip_trend(d,tid,seqs,s_dist,time_max),(d,-1),time_max]]
+                    candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
         candidate_trips = sorted(candidate_trips,key=lambda x: (x[1],-1*x[4],x[6]))
         return {'service_id_%s'%service_id:candidate_trips}
     else:
@@ -180,19 +180,19 @@ def start_od_search(person_trip,w_dist,s_dist,v_dist,buff_time=10,walk_speed=3,b
 
 #miles per hours twords your destination using the minimum (of all stops)
 #stop to stop distance and time bounded by destination time-destination walk time
-def sdist_trip_trend(d,tid,seqs,s_dist,time_max):
-    a = tid[1]
-    x = np.where(seqs[tid[0]][a:][:,1]<=time_max)[0]
-    b = a+(x[-1] if len(x)>0 else 0)
-    if b>a:
-        idx        = np.argmin([s_dist[s[0],d] for s in seqs[tid[0]][a:b]])
-        min_idx    = seqs[tid[0]][a:b][idx]
-        delta_dist = s_dist[seqs[tid[0]][a-1][0],d]-s_dist[min_idx[0],d]
-        delta_time = min_idx[1]-seqs[tid[0]][a-1][1]
+def sdist_trip_trend(tid,tdx,sid,seqs,s_dist,time_max=None):
+    if time_max is not None: x = np.where(seqs[tid][tdx:][:,1]<=time_max)[0]
+    else: x = [len(seqs[tid][tdx])-1]
+    a = tdx+(x[len(x)-1] if len(x)>0 else 0)
+    if a>tdx:
+        idx        = np.argmin([s_dist[s[0],sid] for s in seqs[tid][tdx:a]])
+        min_idx    = seqs[tid][tdx:a][idx]
+        delta_dist = s_dist[seqs[tid][tdx-1][0],sid]-s_dist[min_idx[0],sid]
+        delta_time = min_idx[1]-seqs[tid][tdx-1][1]
     else:
-        delta_dist = s_dist[seqs[tid[0]][a-1][0],d]-s_dist[seqs[tid[0]][a][0],d]
-        delta_time = seqs[tid[0]][a][1]-seqs[tid[0]][a-1][1]
-    return (60*60)*delta_dist/delta_time #miles per hour twords destination
+        delta_dist = s_dist[seqs[tid][tdx-1][0],sid]-s_dist[seqs[tid][tdx][0],sid]
+        delta_time = seqs[tid][tdx][1]-seqs[tid][tdx-1][1]
+    return ((60*60)*delta_dist/delta_time if delta_time>0 else 0.0) #miles per hour twords destination
 
 #cluster together trips that are similiar/small distance away from eachother
 def ldist_cluster(l_dist,thresh=0.5):
@@ -284,19 +284,35 @@ def sub_seq_leg(seqs,tid,tdx,sid,pw):
     return L
 
 #randomly sample the branches encountered in T
-def sample_branches(T,seqs,s,p=1.0):
-    A,B = {},set([])
+def sample_branches(T,seqs,s,p=1.0,max_time=None,s_dist=None,sid=None,rate=None):
+    A,B,S,V,ps = {},set([]),{},{},[]
     for a in range(s[1]+1,len(seqs[s[0]]),1): #can't do a transfer from a transfer
         if (s[0],a) in T:
             for t in T[(s[0],a)]:
                 if t[0:3] not in A or t[3]<A[t[0:3]][0]:
                     A[t[0:3]] = [t[3],a]
-    for k in A: B.add((A[k][1],k+(A[k][0],)))
-    # if p>=1.0: B = sorted(list(B))
-    if len(B)>1:
-        b_idx = sorted(np.random.choice(range(len(B)),max(1,int(len(B)*p)),replace=False))
+                    if t[0] in S: S[t[0]] = (S[t[0]] if S[t[0]]<t[1] else t[1])
+                    else:         S[t[0]] = t[1]
+    if max_time is not None and rate is not None and sid is not None and s_dist is not None:
+        for tid in S:
+            tdx = S[tid]
+            if seqs[tid][tdx][1]<=max_time:
+                mph = sdist_trip_trend(tid,tdx,sid,seqs,s_dist)
+                if mph>rate: V[tid] = mph
+        for k in A:
+            if k[0] in V:
+                B.add((A[k][1],k+(A[k][0],)))
+        B = sorted(list(B),key=lambda x: V[x[1][0]])[::-1]
+        ps = np.array([i+1 for i in range(len(B))][::-1])/(len(B)*(len(B)+1)/2.0)
+        if len(B)>1:
+            b_idx = sorted(np.random.choice(range(len(B)),max(1,int(len(B)*p)),p=ps,replace=False))
+            B = sorted([B[b] for b in b_idx],key=lambda x: V[x[1][0]])[::-1]
+    else:
+        for k in A: B.add((A[k][1],k+(A[k][0],)))
         B = list(B)
-        B = sorted([B[b] for b in b_idx])
+        if len(B)>1:
+            b_idx = sorted(np.random.choice(range(len(B)),max(1,int(len(B)*p)),replace=False))
+            B = sorted([B[b] for b in b_idx])
     return B
 
 #given L: a batch of paths, update K LCS dissimiliar paths
@@ -390,24 +406,31 @@ def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.
     print('searched for max_trans=%s in %s sec'%(t_max,round(stop-start,2)))
     return K,D,S
 
-def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=4,t_p=[1.0,1.0,1.0,1.0]):
-    X = {i:{} for i in range(t_max+1)}
+def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0,verbose=True):
+    t_start = time.time()
+    X,z = {i:{} for i in range(max_trans+1)},0
     for i in range(len(C)):
-        s0,sid = (C[i][0],C[i][1]),C[i][2]
+        s0,sid,max_time = (C[i][0],C[i][1]),C[i][2],C[i][3]
         if s0[0:2] in F and sid in F[s0[0:2]]:
             L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
             Y  = np.array(L,dtype=np.int32)
-            X[0][tuple(Y[:,2])] = Y
-        elif len(X[0])<1 and t_max>0: #will get up to 1-transfer more than optimal
-            for a1,s1 in sample_branches(T,seqs,s0,p=t_p[0]): #a1 is the last stop before transfer-1
+            v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+            if v in X[0]: X[0][v][tuple(Y[:,2])] = Y
+            else:         X[0][v] = {tuple(Y[:,2]):Y}
+        elif len(X[0])<min_paths and max_trans>0: #will get up to 1-transfer more than optimal
+            z += 1
+            for a1,s1 in sample_branches(T,seqs,s0,trans_p[0],max_time,s_dist,sid,min_rate):
                 if s1[0:2] in F and sid in F[s1[0:2]]:
                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
                     L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
                     L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
                     Y  = np.array(L,dtype=np.int32)                                         #np array
-                    X[1][tuple(Y[:,2])] = Y
-                elif len(X[1])<1 and t_max>1:
-                    for a2,s2 in sample_branches(T,seqs,s1,p=t_p[1]): #a2 is the last stop before transfer-2
+                    v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+                    if v in X[1]: X[1][v][tuple(Y[:,2])] = Y
+                    else:         X[1][v] = {tuple(Y[:,2]):Y}
+                elif len(X[1])<min_paths and max_trans>1:
+                    z += 1
+                    for a2,s2 in sample_branches(T,seqs,s1,trans_p[1],max_time,s_dist,sid,min_rate+1.0):
                         if s2[0:2] in F and sid in F[s2[0:2]]:
                             L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
                             L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
@@ -415,9 +438,12 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=4,t_p=[1.0,1.0,1.0,1.0]
                             L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
                             L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
                             Y  = np.array(L,dtype=np.int32)                                         #np array
-                            X[2][tuple(Y[:,2])] = Y
-                        elif len(X[2])<1 and t_max>2: #if len(X[1])<1
-                            for a3,s3 in sample_branches(T,seqs,s2,p=t_p[2]):
+                            v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+                            if v in X[2]: X[2][v][tuple(Y[:,2])] = Y
+                            else:         X[2][v] = {tuple(Y[:,2]):Y}
+                        elif len(X[2])<min_paths and max_trans>2: #if len(X[1])<1
+                            z += 1
+                            for a3,s3 in sample_branches(T,seqs,s2,trans_p[2],max_time,s_dist,sid,min_rate+1.0):
                                 if s3[0:2] in F and sid in F[s3[0:2]]:
                                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
                                     L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
@@ -427,9 +453,12 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=4,t_p=[1.0,1.0,1.0,1.0]
                                     L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
                                     L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
                                     Y  = np.array(L,dtype=np.int32)                                         #np array
-                                    X[3][tuple(Y[:,2])] = Y
-                                elif len(X[3])<1 and t_max>3: #if len(X[2])<1
-                                    for a4,s4 in sample_branches(T,seqs,s3,p=t_p[3]):
+                                    v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+                                    if v in X[3]: X[3][v][tuple(Y[:,2])] = Y
+                                    else:         X[3][v] = {tuple(Y[:,2]):Y}
+                                elif len(X[3])<min_paths and max_trans>3: #if len(X[2])<1
+                                    z += 1
+                                    for a4,s4 in sample_branches(T,seqs,s3,trans_p[3],max_time,s_dist,sid,min_rate+1.0):
                                         if s4[0:2] in F and sid in F[s4[0:2]]:
                                             L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
                                             L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
@@ -441,81 +470,101 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=4,t_p=[1.0,1.0,1.0,1.0]
                                             L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
                                             L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
                                             Y  = np.array(L,dtype=np.int32)                                         #np array
-                                            X[4][tuple(Y[:,2])] = Y
+                                            v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+                                            if v in X[4]: X[4][v][tuple(Y[:,2])] = Y
+                                            else:         X[4][v] = {tuple(Y[:,2]):Y}
+                                        z += 1
+    t_stop = time.time()
+    if verbose: print('tree searched %s edges with %s paths in %s sec'%(z,[len(X[x]) for x in X],round(t_stop-t_start)))
     return X
 
 result_list = []
 def collect_results(result):
     result_list.append(result)
 
-def get_seq_paths(C,seqs,trans): #can write recursively too...
+def get_seq_paths(C,seqs,trans,max_trans=4,trans_p=[1.0,1.0,0.25,0.125],min_rate=-3.0): #can write recursively too...
     T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
     for (tid,tdx) in T:
         for l in T[(tid,tdx)]:
             if (l[0],l[1]) not in F: #tid,tdx
                 F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
-    start = time.time()
-    X    = tu.RTS_FULL(C,T,F,seqs,t_max=4,t_p=[1.0,1.0,0.5,0.25])
-    stop = time.time()
-    print('python RTS in %s sec, paths by transfer=%s'%(round(stop-start,2),[len(X[x]) for x in X]))
+    X    = RTS_FULL(C,T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
     return X
 
+def k_best_paths(X,s_dist,k_dis=5):
+    D,S = {},{}
+    for t in X:
+        D,S = {i:np.zeros((len(X[t]),len(X[t])),dtype=np.float32) for i in range(len(X))},{i:[] for i in range(len(X))}
+        if len(X[t])>1:
+            ks = sorted(X[t])
+            for i in range(len(ks)): D[i,i] = 0.0
+            for i,j in it.combinations(range(len(ks)),2):
+                l = tu.lcs(X[t][ks[i]][:,2:],X[t][ks[j]][:,2:],s_dist)
+                D[t][i,j] = D[t][j,i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
+            for i in range(len(ks)):
+                S[t] += [[i,(X[t][ks[i]][-1][3]-X[t][ks[i]][0][3])+np.sum(X[t][ks[i]][:,4]),np.sum(D[t][i,:])]]
+            idx = [i for i in range(len(ks))]
+            for j in range(k_dis):
+                S[t] = sorted(S[t])
+
+
+
+
 n_base,d_base = 'ha_network/','ha_demand/'
-search_time = ['7:00','8:30']
+search_time = ['7:00','10:00']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
 persons = read_person_trip_list(d_base+'csts.txt')
 stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist']
 trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
 service_ids = get_processed_service_ids(D)
 
-C,X,each_person = {},{},False
+#person,i= 144 trip,j=0
+C,X,each_person = {},{},True
 for i in sorted(persons):
     for j in range(len(persons[i])):
-        can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
-        if can is not None and len(can[sorted(can)[0]]):
-            print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
-            si = list(can.keys())[0]
-            candidates = can[si]
-            if not each_person:
-                for c in candidates:
-                    k = (c[2],c[3],c[5][0])
-                    if si in C:
-                        if k in C[si]: C[si][k] += [(i,j)]
-                        else:          C[si][k]  = [(i,j)]
-                    else:              C[si] =  {k:[(i,j)]}
-            else:
-                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-                K = [[c[2],c[3],c[5][0]] for c in candidates]
-                if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
-                else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
-print('%s unique service_ids to search'%len(C))
+    can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
+    if can is not None and len(can[sorted(can)[0]]):
+        print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+        si = list(can.keys())[0]
+        candidates = can[si]
+        K = []
+        for c in candidates: #leave the trip direction filterin to the main algorithm
+            if c[4]>-3.0: K += [(c[2],c[3],c[5][0],c[6],c[4])]
+        K = sorted(K,key=lambda x: x[4])[::-1]
+        if not each_person:
+            for k in K:
+                if si in C:
+                    if k in C[si]: C[si][k] += [(i,j)]
+                    else:          C[si][k]  = [(i,j)]
+                else:              C[si] =  {k:[(i,j)]}
+        else:
+            seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+            if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
+            else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
+    print('%s unique service_ids to search'%len(C))
 
-if not each_person: #pools the unique search possibilities....
-    for si in sorted(C):
-        print('processing %s'%si)
-        seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-        cpus,ks = mp.cpu_count(),sorted(C[si])
-        partitions,n = [],len(ks)//cpus
-        for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
-        if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
-        # get_seq_paths(partitions[0],seqs,trans)
-        # get_seq_paths(partitions[1],seqs,trans)
-        # get_seq_paths(partitions[2],seqs,trans)
-        # get_seq_paths(partitions[3],seqs,trans)
-        print('starting || cython random tree search (RTS) computation')
-        t_start = time.time()
-        p1 = mp.Pool(processes=cpus)
-        for i in range(len(partitions)):
-            p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
-        p1.close()
-        p1.join()
-        t_stop = time.time()
-        X = {}
-        for result in result_list:
-            for i in result:
-                if i in X:
-                    for j in result[i]: X[i][j] = result[i][j]
-                else:
-                    X[i] = {}
-                    for j in result[i]: X[i][j] = result[i][j]
-    #now you have to dig out each persons search to match up results
+    if not each_person: #pools the unique search possibilities....
+        for si in sorted(C):
+            print('processing %s'%si)
+            seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+            cpus,ks = mp.cpu_count(),sorted(C[si])
+            partitions,n = [],len(ks)//cpus
+            for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
+            if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
+            print('starting || cython random tree search (RTS) computation')
+            t_start = time.time()
+            p1 = mp.Pool(processes=cpus)
+            for i in range(len(partitions)):
+                p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
+            p1.close()
+            p1.join()
+            t_stop = time.time()
+            X = {}
+            for result in result_list:
+                for i in result:
+                    if i in X:
+                        for j in result[i]: X[i][j] = result[i][j]
+                    else:
+                        X[i] = {}
+                        for j in result[i]: X[i][j] = result[i][j]
+        #now you have to dig out each persons search to match up results
