@@ -524,7 +524,6 @@ def k_dis_paths(X,s_dist,k=5):
     return K
         #now we have the ldist matrix for the viable trips and the cost
 
-
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['7:00','10:00']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
