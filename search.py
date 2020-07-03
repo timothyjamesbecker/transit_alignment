@@ -415,8 +415,8 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
             L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
             Y  = np.array(L,dtype=np.int32)
             v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
-            if v in X[0]: X[0][v][tuple(Y[:,2])] = Y
-            else:         X[0][v] = {tuple(Y[:,2]):Y}
+            if v in X[0]: X[0][v][tuple(set(Y[:,2]))] = Y
+            else:         X[0][v] = {tuple(set(Y[:,2])):Y}
         elif len(X[0])<min_paths and max_trans>0: #will get up to 1-transfer more than optimal
             z += 1
             for a1,s1 in sample_branches(T,seqs,s0,trans_p[0],max_time,s_dist,sid,min_rate):
@@ -426,8 +426,8 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                     L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
                     Y  = np.array(L,dtype=np.int32)                                         #np array
                     v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
-                    if v in X[1]: X[1][v][tuple(Y[:,2])] = Y
-                    else:         X[1][v] = {tuple(Y[:,2]):Y}
+                    if v in X[1]: X[1][v][tuple(set(Y[:,2]))] = Y
+                    else:         X[1][v] = {tuple(set(Y[:,2])):Y}
                 elif len(X[1])<min_paths and max_trans>1:
                     z += 1
                     for a2,s2 in sample_branches(T,seqs,s1,trans_p[1],max_time,s_dist,sid,min_rate+1.0):
@@ -439,8 +439,8 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                             L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
                             Y  = np.array(L,dtype=np.int32)                                         #np array
                             v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
-                            if v in X[2]: X[2][v][tuple(Y[:,2])] = Y
-                            else:         X[2][v] = {tuple(Y[:,2]):Y}
+                            if v in X[2]: X[2][v][tuple(set(Y[:,2]))] = Y
+                            else:         X[2][v] = {tuple(set(Y[:,2])):Y}
                         elif len(X[2])<min_paths and max_trans>2: #if len(X[1])<1
                             z += 1
                             for a3,s3 in sample_branches(T,seqs,s2,trans_p[2],max_time,s_dist,sid,min_rate+1.0):
@@ -454,8 +454,8 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                                     L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
                                     Y  = np.array(L,dtype=np.int32)                                         #np array
                                     v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
-                                    if v in X[3]: X[3][v][tuple(Y[:,2])] = Y
-                                    else:         X[3][v] = {tuple(Y[:,2]):Y}
+                                    if v in X[3]: X[3][v][tuple(set(Y[:,2]))] = Y
+                                    else:         X[3][v] = {tuple(set(Y[:,2])):Y}
                                 elif len(X[3])<min_paths and max_trans>3: #if len(X[2])<1
                                     z += 1
                                     for a4,s4 in sample_branches(T,seqs,s3,trans_p[3],max_time,s_dist,sid,min_rate+1.0):
@@ -482,7 +482,7 @@ result_list = []
 def collect_results(result):
     result_list.append(result)
 
-def get_seq_paths(C,seqs,trans,max_trans=4,trans_p=[1.0,1.0,0.25,0.125],min_rate=-3.0): #can write recursively too...
+def get_seq_paths(C,seqs,trans,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0):
     T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
     for (tid,tdx) in T:
         for l in T[(tid,tdx)]:
@@ -491,29 +491,44 @@ def get_seq_paths(C,seqs,trans,max_trans=4,trans_p=[1.0,1.0,0.25,0.125],min_rate
     X    = RTS_FULL(C,T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
     return X
 
-def k_best_paths(X,s_dist,k_dis=5):
-    D,S = {},{}
+def k_dis_paths(X,s_dist,k=5):
+    #unpack the cost keys to seq tuples
+    S,K = {},{}
     for t in X:
-        D,S = {i:np.zeros((len(X[t]),len(X[t])),dtype=np.float32) for i in range(len(X))},{i:[] for i in range(len(X))}
-        if len(X[t])>1:
-            ks = sorted(X[t])
-            for i in range(len(ks)): D[i,i] = 0.0
-            for i,j in it.combinations(range(len(ks)),2):
-                l = tu.lcs(X[t][ks[i]][:,2:],X[t][ks[j]][:,2:],s_dist)
-                D[t][i,j] = D[t][j,i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
-            for i in range(len(ks)):
-                S[t] += [[i,(X[t][ks[i]][-1][3]-X[t][ks[i]][0][3])+np.sum(X[t][ks[i]][:,4]),np.sum(D[t][i,:])]]
-            idx = [i for i in range(len(ks))]
-            for j in range(k_dis):
-                S[t] = sorted(S[t])
-
-
+        S[t] = []
+        for v in X[t]:
+            for s in X[t][v]: S[t] += [[X[t][v][s],v,0.0,0.0]]
+        S[t] = sorted(S[t],key=lambda x: x[1])
+        if len(S[t])>1:
+            off = min([S[t][i][1] for i in range(len(S[t]))])
+            dif = max([S[t][i][1] for i in range(len(S[t]))])-off
+            if dif>0.0:
+                for i in range(len(S[t])): S[t][i][2] = (S[t][i][1]-off)/dif
+    for t in S:
+        print('t=%s'%t)
+        SP,K[t],D = [],[],np.zeros((len(S[t]),len(S[t])),dtype=np.float32) #LCSWT harmonic mean distance from 0.0 to 1.0
+        if len(S[t])>k: #k=1 is just lowest cost path
+            x = 1
+            for i in range(len(S[t])):         #calculate upper triangle
+                if i%10==0: print('t=%s i=%s'%(t,i))
+                for j in range(x,len(S[t]),1): #and copy to lower triangle
+                    l = tu.lcs(S[t][i][0][:,2:],S[t][j][0][:,2:],s_dist)
+                    D[i][j] = D[j][i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
+                x += 1
+            print('finished all pairs LCSWT for t=%s'%t)
+            for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])
+            for i in range(1,k+1,1): #S_term(cost)+D_term(distance)
+                S[t] = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k-1.0))+(1.0-y[3])*(i-1.0)/(k-1.0))
+                K[t] += [S[t][0]]
+                S[t] = S[t][1:]
+    return K
+        #now we have the ldist matrix for the viable trips and the cost
 
 
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['7:00','10:00']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
-persons = read_person_trip_list(d_base+'csts.txt')
+persons = read_person_trip_list(d_base+'csts_07022020.txt')
 stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist']
 trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
 service_ids = get_processed_service_ids(D)
@@ -522,49 +537,48 @@ service_ids = get_processed_service_ids(D)
 C,X,each_person = {},{},True
 for i in sorted(persons):
     for j in range(len(persons[i])):
-    can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
-    if can is not None and len(can[sorted(can)[0]]):
-        print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
-        si = list(can.keys())[0]
-        candidates = can[si]
-        K = []
-        for c in candidates: #leave the trip direction filterin to the main algorithm
-            if c[4]>-3.0: K += [(c[2],c[3],c[5][0],c[6],c[4])]
-        K = sorted(K,key=lambda x: x[4])[::-1]
-        if not each_person:
-            for k in K:
-                if si in C:
-                    if k in C[si]: C[si][k] += [(i,j)]
-                    else:          C[si][k]  = [(i,j)]
-                else:              C[si] =  {k:[(i,j)]}
-        else:
-            seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-            if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
-            else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
-    print('%s unique service_ids to search'%len(C))
-
-    if not each_person: #pools the unique search possibilities....
-        for si in sorted(C):
-            print('processing %s'%si)
-            seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-            cpus,ks = mp.cpu_count(),sorted(C[si])
-            partitions,n = [],len(ks)//cpus
-            for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
-            if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
-            print('starting || cython random tree search (RTS) computation')
-            t_start = time.time()
-            p1 = mp.Pool(processes=cpus)
-            for i in range(len(partitions)):
-                p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
-            p1.close()
-            p1.join()
-            t_stop = time.time()
-            X = {}
-            for result in result_list:
-                for i in result:
-                    if i in X:
-                        for j in result[i]: X[i][j] = result[i][j]
-                    else:
-                        X[i] = {}
-                        for j in result[i]: X[i][j] = result[i][j]
-        #now you have to dig out each persons search to match up results
+# i,j = 144,0
+        can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
+        if can is not None and len(can[sorted(can)[0]]):
+            print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+            si = list(can.keys())[0]
+            candidates = can[si]
+            K = []
+            for c in candidates: #leave the trip direction filterin to the main algorithm
+                K += [(c[2],c[3],c[5][0],c[6],c[4])]
+            K = sorted(K,key=lambda x: x[4])[::-1]
+            if not each_person:
+                for k in K:
+                    if si in C:
+                        if k in C[si]: C[si][k] += [(i,j)]
+                        else:          C[si][k]  = [(i,j)]
+                    else:              C[si] =  {k:[(i,j)]}
+            else:
+                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+                if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
+                else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
+        if not each_person: #pools the unique search possibilities....
+            for si in sorted(C):
+                print('processing %s'%si)
+                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+                cpus,ks = mp.cpu_count(),sorted(C[si])
+                partitions,n = [],len(ks)//cpus
+                for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
+                if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
+                print('starting || cython random tree search (RTS) computation')
+                t_start = time.time()
+                p1 = mp.Pool(processes=cpus)
+                for i in range(len(partitions)):
+                    p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
+                p1.close()
+                p1.join()
+                t_stop = time.time()
+                X = {}
+                for result in result_list:
+                    for i in result:
+                        if i in X:
+                            for j in result[i]: X[i][j] = result[i][j]
+                        else:
+                            X[i] = {}
+                            for j in result[i]: X[i][j] = result[i][j]
+                #now you have to dig out each persons search to match up results
