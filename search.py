@@ -478,6 +478,41 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
     if verbose: print('tree searched %s edges with %s paths in %s sec'%(z,[len(X[x]) for x in X],round(t_stop-t_start)))
     return X
 
+#get lowest cost
+def get_path(X,person,trip,method='low-cost'):
+    if method=='low-cost':
+        path = [np.iinfo(np.int32).max,[]]
+        for i in range(len(X[person][trip])):
+            if len(X[person][trip][i])>0:
+                ks = sorted(X[person][trip][i])
+                xp = X[person][trip][i][ks[0]]
+                if ks[0] < path[0]: path = [ks[0],xp[sorted(xp)[0]]]
+    elif method=='high-cost':
+        path = [np.iinfo(np.int32).min,[]]
+        for i in range(len(X[person][trip])):
+            if len(X[person][trip][i])>0:
+                ks = sorted(X[person][trip][i])
+                xp = X[person][trip][i][ks[-1]]
+                if ks[-1] > path[0]: path = [ks[-1],xp[sorted(xp)[0]]]
+    if method=='low-transfer':
+        path = [None,[]]
+        for i in range(len(X[person][trip])):
+            if len(X[person][trip][i])>0:
+                ks = sorted(X[person][trip][i])
+                xp = X[person][trip][i][ks[0]]
+                path = [ks[0],xp[sorted(xp)[0]]]
+                break
+    if method=='high-transfer':
+        path = [None, []]
+        for i in range(len(X[person][trip])-1,0,-1):
+            if len(X[person][trip][i]) > 0:
+                ks = sorted(X[person][trip][i])
+                xp = X[person][trip][i][ks[0]]
+                path = [ks[0],xp[sorted(xp)[0]]]
+                break
+    return path
+
+
 result_list = []
 def collect_results(result):
     result_list.append(result)
@@ -525,7 +560,7 @@ def k_dis_paths(X,s_dist,k=5):
         #now we have the ldist matrix for the viable trips and the cost
 
 n_base,d_base = 'ha_network/','ha_demand/'
-search_time = ['7:00','10:00']
+search_time = ['0:00','32:00']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
 persons = read_person_trip_list(d_base+'csts_07022020.txt')
 stops,s_idx,s_names,s_dist,w_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist']
@@ -533,51 +568,43 @@ trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['cale
 service_ids = get_processed_service_ids(D)
 
 #person,i= 144 trip,j=0
-C,X,each_person = {},{},True
+X,P,min_rate = {},[],-3.0
 for i in sorted(persons):
     for j in range(len(persons[i])):
-# i,j = 144,0
         can = start_od_search(persons[i][j],w_dist,s_dist,v_dist)
         if can is not None and len(can[sorted(can)[0]]):
-            print('person=%s,trip=%s was valid on %s, running RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+            print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
             si = list(can.keys())[0]
             candidates = can[si]
             K = []
             for c in candidates: #leave the trip direction filterin to the main algorithm
                 K += [(c[2],c[3],c[5][0],c[6],c[4])]
-            K = sorted(K,key=lambda x: x[4])[::-1]
-            if not each_person:
-                for k in K:
-                    if si in C:
-                        if k in C[si]: C[si][k] += [(i,j)]
-                        else:          C[si][k]  = [(i,j)]
-                    else:              C[si] =  {k:[(i,j)]}
-            else:
-                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-                if i in X: X[i][j] = get_seq_paths(K,seqs,trans)
-                else:      X[i]= {j:get_seq_paths(K,seqs,trans)}
-        if not each_person: #pools the unique search possibilities....
-            for si in sorted(C):
-                print('processing %s'%si)
-                seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
-                cpus,ks = mp.cpu_count(),sorted(C[si])
-                partitions,n = [],len(ks)//cpus
-                for i in range(cpus): partitions     += [ks[i*n:(i+1)*n]]
-                if len(ks)%cpus>0:   partitions[-1] += ks[-1*(len(ks)%cpus):]
-                print('starting || cython random tree search (RTS) computation')
-                t_start = time.time()
-                p1 = mp.Pool(processes=cpus)
-                for i in range(len(partitions)):
-                    p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
-                p1.close()
-                p1.join()
-                t_stop = time.time()
-                X = {}
-                for result in result_list:
-                    for i in result:
-                        if i in X:
-                            for j in result[i]: X[i][j] = result[i][j]
-                        else:
-                            X[i] = {}
-                            for j in result[i]: X[i][j] = result[i][j]
-                #now you have to dig out each persons search to match up results
+            P += [[i,j,si,sorted(K,key=lambda x: x[4])[::-1]]]
+
+        # if not each_person: #pools the unique search possibilities....
+        #     for si in sorted(C):
+        #         print('processing %s'%si)
+        #         seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+
+cpus = mp.cpu_count()
+partitions,n = [],len(P)//cpus
+for i in range(cpus): partitions     += [P[i*n:(i+1)*n]]
+if len(P)%cpus>0:    partitions[-1] += P[-1*(len(P)%cpus):]
+print('starting || cython random tree search (RTS) computation')
+
+# t_start = time.time()
+# p1 = mp.Pool(processes=cpus)
+# for i in range(len(partitions)):
+#     p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
+# p1.close()
+# p1.join()
+# t_stop = time.time()
+# X = {}
+# for result in result_list:
+#     for i in result:
+#         if i in X:
+#             for j in result[i]: X[i][j] = result[i][j]
+#         else:
+#             X[i] = {}
+#             for j in result[i]: X[i][j] = result[i][j]
+#now you have to dig out each persons search to match up results
