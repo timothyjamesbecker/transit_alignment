@@ -12,7 +12,7 @@ import multiprocessing as mp
 import read_utils as ru
 import transit_utils as tu
 
-des = """Preproccess Network Tool, Copyright (C) 2020 Timothy James Becker"""
+des = """Preprocess Network Tool, Copyright (C) 2020 Timothy James Becker"""
 parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
 parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
 parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
