@@ -12,36 +12,6 @@ import multiprocessing as mp
 import read_utils as ru
 import transit_utils as tu
 
-des = """Preprocess Network Tool, Copyright (C) 2020 Timothy James Becker"""
-parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
-parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
-parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
-parser.add_argument('--date',type=str,help='date to preprocess with, leave out to iterate on all\t[all from network]')
-parser.add_argument('--walk',type=float,help='walking distance in miles to use as upper bound for access and transfers\t[0.5]')
-parser.add_argument('--time',type=str,help='comma seperated time range. Leave out to use all\t[0:00,32:00]')
-parser.add_argument('--cpus',type=int,help='number of parallel cores for pairwise LCSWT\t[all]')
-# parser.add_argument('--test',action='store_true',help='')
-args = parser.parse_args()
-#--------------------------------------
-if args.in_path is not None:
-    n_base = args.in_path
-else: raise IOError
-if args.out_dir is not None:
-    out_dir = args.out_dir
-else: out_dir = n_base
-if args.date is not None:
-    search_date = args.date
-else: search_date = None
-if args.time is not None:
-    search_time = args.time.split(',')
-else: search_time = [0,32*60*60]
-if args.walk is not None:
-    walk_buffer = args.walk
-else: walk_buffer = 0.5
-if args.cpus is not None:
-    cpus = args.cpus
-else: cpus = mp.cpu_count()
-
 result_list = []
 def collect_results(result):
     result_list.append(result)
@@ -232,14 +202,49 @@ def time_overlap(xys,ss,ls):
 #---------------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
+    des = """Preprocess Network Tool, Copyright (C) 2020 Timothy James Becker"""
+    parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
+    parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
+    parser.add_argument('--date',type=str,help='date to preprocess with, leave out to iterate on all\t[all from network]')
+    parser.add_argument('--walk',type=float,help='walking distance in miles to use as upper bound for access and transfers\t[0.5]')
+    parser.add_argument('--drive',type=float,help='driving distance in miles to use as upper bound for park and ride access,egress\t[15.0]')
+    parser.add_argument('--time',type=str,help='comma seperated time range. Leave out to use all\t[0:00,32:00]')
+    parser.add_argument('--cpus',type=int,help='number of parallel cores for pairwise LCSWT\t[all]')
+    # parser.add_argument('--test',action='store_true',help='')
+    args = parser.parse_args()
+    #--------------------------------------
+    if args.in_path is not None:
+        n_base = args.in_path
+    else: raise IOError
+    if args.out_dir is not None:
+        out_dir = args.out_dir
+    else: out_dir = n_base
+    if args.date is not None:
+        search_date = args.date
+    else: search_date = None
+    if args.time is not None:
+        search_time = args.time.split(',')
+    else: search_time = [0,32*60*60]
+    if args.walk is not None:
+        walk_buffer = args.walk
+    else: walk_buffer = 0.5
+    if args.drive is not None:
+        drive_buffer = args.drive
+    else: drive_buffer = 15.0
+    if args.cpus is not None:
+        cpus = args.cpus
+    else: cpus = mp.cpu_count()
+
     print('starting to preprocess GTFS data folder = %s'%n_base)
     stops,stop_idx,s_names,s_dist = ru.read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
     v_dist         = ru.gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
     v_dist = {}
     trips,trip_idx = ru.read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
     w_dist         = ru.read_walk_access(n_base,stop_idx,walk_buff=walk_buffer)
+    p_dist         = ru.read_park_and_ride(n_base,stop_idx,drive_buff=drive_buffer)
     calendar       = ru.read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
-    DATA = {'stops':stops,'s_names':s_names,'stop_idx':stop_idx,'s_dist':s_dist,'w_dist':w_dist,
+    DATA = {'stops':stops,'s_names':s_names,'stop_idx':stop_idx,'s_dist':s_dist,'w_dist':w_dist,'p_dist':p_dist,
             'trips':trips,'trip_idx':trip_idx,'v_dist':v_dist,'calendar':calendar}
     if search_date is not None and type(search_date) is str:
         service_id  = ru.get_service_id(calendar,search_date)

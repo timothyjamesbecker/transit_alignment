@@ -1,5 +1,6 @@
 import os
 import sys
+import glob
 import copy
 import datetime
 import time
@@ -17,7 +18,7 @@ import transit_utils as tu
 # NN is the index of the NN list inside the stops list
 def read_gtfs_stops(n_path,max_miles=0.5,NN=2):
     header,data = [],[]
-    with open(n_path+'stops.txt','r') as f:
+    with open(glob.glob(n_path+'stops*.txt')[0],'r') as f:
         raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
@@ -47,7 +48,7 @@ def read_gtfs_stops(n_path,max_miles=0.5,NN=2):
 def gtfs_stop_time_shape_dist(n_path,s_idx):
     start = time.time()
     header, data = [], []
-    with open(n_path+'stop_times.txt', 'r') as f:
+    with open(glob.glob(n_path+'stop_times*.txt')[0], 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
@@ -80,7 +81,7 @@ def read_gtfs_shape(n_bas):
 
 def read_gtfs_calendar(n_base):
     header,data = [],[]
-    with open(n_base+'calendar.txt','r') as f:
+    with open(glob.glob(n_base+'calendar.txt')[0],'r') as f:
         raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
@@ -101,7 +102,7 @@ def read_gtfs_calendar(n_base):
 
 def read_gtfs_trips(n_base,merge='_merged_'):
     header,data = [],[]
-    with open(n_base+'trips.txt', 'r') as f:
+    with open(glob.glob(n_base+'trips*.txt')[0], 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
@@ -150,7 +151,7 @@ def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,service_id=None,search_date
     elif service_id is not None: s_id = service_id
     if s_id is not None: #can only select one service id (weekday,sat,sun)
         header,data = [],[]
-        with open(n_base+'stop_times.txt', 'r') as f:
+        with open(glob.glob(n_base+'stop_times*.txt')[0], 'r') as f:
             raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
         header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
         c_idx = {header[i]:i for i in range(len(header))}
@@ -270,11 +271,39 @@ def seqs_to_ndarray(seqs):
 
 #from fast trips data analysis---------------------------------------------------
 
+def read_park_and_ride(n_path,s_idx,drive_buff=15.0,drive_conv=1.0):
+    header, data = [], []
+    with open(glob.glob(n_path+'park_and_ride_access*.txt')[0], 'r') as f:
+        raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
+    header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
+    data = [row.rsplit(',') for row in raw[1:]]
+    c_idx = {header[i]:i for i in range(len(header))}
+    park,short,filt = {},0,0
+    for i in range(len(data)):
+        taz,stop_id = int(data[i][c_idx['taz']]),int(data[i][c_idx['stop_id']].split('_merged_')[0])
+        if 'direction' in c_idx: dir  = (1 if data[i][c_idx['direction']]=='access' else 0)
+        else:                    dir  = -1 #no direction feild is present
+        dist = float(data[i][c_idx['dist']])*drive_conv; #miles
+        if dist<=drive_buff:
+            if taz in park: park[taz][stop_id] = {0:dist,1:dist}
+            else:           park[taz] = {stop_id:{0:dist,1:dist}}
+            short+=1
+        else: filt+=1
+    print('%s out of %s taz-stop pairs were beyond the %s mi drive buffer and were filtered'%(filt,filt+short,drive_buff))
+    D = {}
+    for taz in park:
+        for sid in park[taz]:
+            if taz in D:        D[taz][s_idx[sid]] = np.float32(park[taz][sid][1])
+            else:               D[taz] = {s_idx[sid]:np.float32(park[taz][sid][1])} #access=1
+            if s_idx[sid] in D: D[s_idx[sid]][taz] = np.float32(park[taz][sid][0])
+            else:               D[s_idx[sid]] = {taz:np.float32(park[taz][sid][0])} #egress=0
+    return D
+
 #will give taz to stop_id associated distances in m (walk_access_ft dist is in km)
 #walk buff is in meters => 800 ~0.5 miles
 def read_walk_access(n_path,s_idx,walk_buff=0.5,walk_conv=1.0):
     header, data = [], []
-    with open(n_path+'walk_access.txt', 'r') as f:
+    with open(glob.glob(n_path+'walk_access*.txt')[0], 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]  # field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     data = [row.rsplit(',') for row in raw[1:]]
@@ -282,8 +311,9 @@ def read_walk_access(n_path,s_idx,walk_buff=0.5,walk_conv=1.0):
 
     walk,short,filt = {},0,0
     for i in range(len(data)):
-        taz,stop_id,dir = int(data[i][0]),int(data[i][1].split('_merged_')[0]),(1 if data[i][2]=='access' else 0)
-        dist = float(data[i][3])*walk_conv; #miles
+        taz,stop_id = int(data[i][c_idx['taz']]),int(data[i][c_idx['stop_id']].split('_merged_')[0])
+        dir  = (1 if data[i][c_idx['direction']]=='access' else 0)
+        dist = float(data[i][c_idx['dist']])*walk_conv; #miles
         if dist<=walk_buff: #will trim long walks...
             if taz in walk:
                 if stop_id in walk[taz]: walk[taz][stop_id][dir] = dist
