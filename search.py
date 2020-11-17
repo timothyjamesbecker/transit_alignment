@@ -177,7 +177,7 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_tim
         if service_id is None: print('service_id was not found for date=%s'%dt[0])
         else:
             #check o_taz->(p_dist) d_taz->(p_dist)
-            
+
             print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
         return None
 
