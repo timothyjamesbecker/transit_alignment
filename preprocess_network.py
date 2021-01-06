@@ -240,7 +240,6 @@ if __name__ == '__main__':
     print('starting to preprocess GTFS data folder = %s'%n_base)
     stops,stop_idx,s_names,s_dist = ru.read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
     v_dist         = ru.gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
-    v_dist = {}
     trips,trip_idx = ru.read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
     w_dist         = ru.read_walk_access(n_base,stop_idx,walk_buff=walk_buffer)
     p_dist         = ru.read_park_and_ride(n_base,stop_idx,drive_buff=drive_buffer)

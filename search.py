@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import datetime
+import re
 import glob
 import gzip
 import pickle
@@ -25,7 +26,7 @@ def mem_size(obj,unit='G'):
 def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want to play around with demand files : IE dynamic...
     header,data = [],[]
     with open(path,'r') as f:
-        raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
+        raw = [re.sub(quoting+'+',quoting,row.replace('\r','').replace('\n','')) for row in f.readlines()]
     header = [f for f in raw[0].rsplit(delim)]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
     data,j = [],0
