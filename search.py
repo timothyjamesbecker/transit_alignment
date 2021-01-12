@@ -128,23 +128,32 @@ def get_search_time(base_time,buff_time=10,symetric=True):
     return search_time
 
 #buff_time is in minutes, walking speed is in mi/hour, start with forwar search only...
-def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_time=90,walk_speed=3,bus_speed=12):
-    w_secs = (60.0*60.0)/walk_speed #seconds/mi
+def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_time=90,walk_speed=3,bus_speed=12,drive_speed=30):
+    w_secs = (60.0*60.0)/walk_speed  #time walking in seconds => seconds/mi
+    p_secs = (60.0*60.0)/drive_speed #time driving in seconds => seconds/mi
     dt = get_datetime(person_trip)
     search_time = get_search_time(dt[1][0],buff_time=buff_time*60)
     o_taz,d_taz = person_trip[0],person_trip[3]
     service_id  = ru.get_service_id(calendar,dt[0])
-    if o_taz in w_dist and d_taz in w_dist and service_id in service_ids:
+    if (o_taz in w_dist or d_taz in w_dist) and service_id in service_ids:
         print('o_taz=%s, d_taz=%s and service_id=%s were found for person trip'%(o_taz,d_taz,service_id))
         sid = 'service_id_%s'%service_id
         seqs,graph,l_dist,l_idx = D[sid]['seqs'],D[sid]['graph'],D[sid]['l_dist'],D[sid]['l_idx']
 
         #enumerate the posible o,d stop pairs and rank by minimum wdist[otaz][o]+sdist[o,d]+wdist[dtaz][d]
-        wods = {'o':{},'d':{}}
-        for o in w_dist[o_taz]:
-            if o in seqs: wods['o'][o] = w_dist[o_taz][o]
-        for d in w_dist[d_taz]:
-            if d in seqs: wods['d'][d] = w_dist[d_taz][d]
+        wods,pods = {'o':{},'d':{}},{'o':{},'d':{}}
+        if o_taz in w_dist:
+            for o in w_dist[o_taz]:
+                if o in seqs: wods['o'][o] = w_dist[o_taz][o]
+        if d_taz in w_dist:
+            for d in w_dist[d_taz]:
+                if d in seqs: wods['d'][d] = w_dist[d_taz][d]
+        if o_taz in p_dist:
+            for o in p_dist[o_taz]:
+                if o in seqs: pods['o'][o] = p_dist[o_taz][o]
+        if d_taz in p_dist:
+            for d in p_dist[d_taz]:
+                if d in seqs: pods['d'][d] = p_dist[d_taz][d]
         od_search = []
         for o in wods['o']:
             for d in wods['d']:
@@ -162,24 +171,81 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_tim
         od_search = sorted(od_search,key=lambda x: x[2])
 
         #now we can start search for trips------------------------------------------------------------------------------------
-        candidate_trips = []
+        candidate_trips,c_i = [],0
         for c in od_search:
             o,d,e,time_max = c[0][0],c[0][1],c[1],c[2] #origin stop, destination stop and distance estimate
-            owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
-            s_time = [search_time[0]+owt,search_time[1]+owt]
-            for i in range(len(graph[o]['out'])):
-                if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
-                    tid = graph[o]['out'][i][2:]
-                    candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
-                    candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
+            if o in wods['o']:
+                owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
+                s_time = [search_time[0]+owt,search_time[1]+owt]
+                if o in graph:
+                    for i in range(len(graph[o]['out'])):
+                        if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
+                            tid = graph[o]['out'][i][2:]
+                            candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
+                            candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
+            c_i += 1
         candidate_trips = sorted(candidate_trips,key=lambda x: (x[1],-1*x[4],x[6]))
+        if len(candidate_trips)<1:
+            print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
+            #check o_taz->(p_dist) d_taz->(p_dist)
+            od_search = []
+            for o in wods['o']:
+                for d in pods['d']:
+                    sw_dist = s_dist[o,d]+wods['o'][o]
+                    #::: TIME UPPER BOUND :::-------------------------------------------------
+                    if sw_dist<3.0:
+                        time_upper = dt[1][0]+int(round(60.0*(60.0/walk_speed)*(sw_dist)))
+                    elif sw_dist>=3.0 and sw_dist<6.0:
+                        time_upper = dt[1][0]+int(round(60.0*(60.0/walk_speed)*(wods['o'][o])))+\
+                            int(round(60.0*(60.0/bus_speed)*(2.0*s_dist[o,d])))
+                    else:
+                        time_upper = dt[1][0]+max_time*60 #90 minute upper bound
+                    #::: TIME UPPER BOUND :::-------------------------------------------------
+                    od_search += [[(o,d),sw_dist,time_upper]]
+            for o in pods['o']:
+                for d in wods['d']:
+                    sw_dist = s_dist[o,d]+wods['d'][d]
+                    #::: TIME UPPER BOUND :::-------------------------------------------------
+                    if sw_dist<3.0:
+                        time_upper = dt[1][0]+int(round(60.0*(60.0/walk_speed)*(sw_dist)))
+                    elif sw_dist>=3.0 and sw_dist<6.0:
+                        time_upper = dt[1][0]+int(round(60.0*(60.0/walk_speed)*(wods['d'][d])))+\
+                            int(round(60.0*(60.0/bus_speed)*(2.0*s_dist[o,d])))
+                    else:
+                        time_upper = dt[1][0]+max_time*60 #90 minute upper bound
+                    #::: TIME UPPER BOUND :::-------------------------------------------------
+                    od_search += [[(o,d),sw_dist,time_upper]]
+            od_search = sorted(od_search,key=lambda x: x[2])
+            candidate_trips,c_i = [],0
+            for c in od_search:
+                o,d,e,time_max = c[0][0],c[0][1],c[1],c[2] #origin stop, destination stop and distance estimate
+                if o in wods['o']:
+                    owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
+                    s_time = [search_time[0]+owt,search_time[1]+owt]
+                    if o in graph:
+                        for i in range(len(graph[o]['out'])):
+                            if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
+                                tid = graph[o]['out'][i][2:]
+                                candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
+                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-3),time_max]]
+                elif o in pods['o']:
+                    owt = int(round(pods['o'][o]*p_secs+0.5))
+                    s_time = [search_time[0]+owt,search_time[1]+owt]
+                    if o in graph:
+                        for i in range(len(graph[o]['out'])):
+                            if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
+                                tid = graph[o]['out'][i][2:]
+                                candidate_trip = [(-3,o),graph[o]['out'][i][1]]+list(tid)
+                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
+                c_i += 1
+            candidate_trips = sorted(candidate_trips,key=lambda x: (x[1],-1*x[4],x[6]))
+            if len(candidate_trips)<1:
+                print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
+                return None
         return {'service_id_%s'%service_id:candidate_trips}
     else:
         if service_id is None: print('service_id was not found for date=%s'%dt[0])
-        else:
-            #check o_taz->(p_dist) d_taz->(p_dist)
-
-            print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
+        else:                  print('empty park+walk candidates for person trip:%s'%[o_taz,d_taz,service_id])
         return None
 
 #miles per hours twords your destination using the minimum (of all stops)
@@ -520,13 +586,20 @@ result_list = []
 def collect_results(result):
     result_list.append(result)
 
-def get_seq_paths(C,seqs,trans,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0):
-    T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
-    for (tid,tdx) in T:
-        for l in T[(tid,tdx)]:
-            if (l[0],l[1]) not in F: #tid,tdx
-                F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
-    X    = RTS_FULL(C,T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
+def get_seq_paths(C,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0):
+    X = {'error':[],'result':[]}
+    for i in range(len(C)):
+        try:
+            si = C[i][2]
+            seqs,trans = D[si]['seqs'],D[si]['trans'] #doesn't work for multiple service ids...
+            T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
+            for (tid,tdx) in T:
+                for l in T[(tid,tdx)]:
+                    if (l[0],l[1]) not in F: #tid,tdx
+                        F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
+            R = RTS_FULL(C[i][3],T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
+            X['result'] += [[C[i][0],C[i][1],C[i][2],R,k_dis_paths(R,s_dist,k=5)]]
+        except Exception as E: X['error'] += [str(E)]
     return X
 
 def k_dis_paths(X,s_dist,k=5):
@@ -593,21 +666,31 @@ cpus = mp.cpu_count()
 partitions,n = [],len(P)//cpus
 for i in range(cpus): partitions     += [P[i*n:(i+1)*n]]
 if len(P)%cpus>0:     partitions[-1] += P[-1*(len(P)%cpus):]
-print('starting || cython random tree search (RTS) computation')
+result_path = d_base+'rts.result.pickle.gz'
+if not os.path.exists(result_path):
+    print('starting || cython random tree search (RTS) computation')
 
-# t_start = time.time()
-# p1 = mp.Pool(processes=cpus)
-# for i in range(len(partitions)):
-#     p1.apply_async(get_seq_paths,args=(partitions[i],seqs,trans),callback=collect_results)
-# p1.close()
-# p1.join()
-# t_stop = time.time()
-# X = {}
-# for result in result_list:
-#     for i in result:
-#         if i in X:
-#             for j in result[i]: X[i][j] = result[i][j]
-#         else:
-#             X[i] = {}
-#             for j in result[i]: X[i][j] = result[i][j]
+    t_start = time.time()
+    p1 = mp.Pool(processes=cpus)
+    for i in range(len(partitions)):
+        p1.apply_async(get_seq_paths,args=(partitions[i],3,[1.0,1.0,0.5,0.25],-3.0),callback=collect_results)
+    p1.close()
+    p1.join()
+    t_stop = time.time()
+    print(result_list)
+
+    X,K = {},{}
+    for result in result_list:
+        if len(result['error'])<1:
+            for i in range(len(result['result'])):
+                a,b,sid = result['result'][i][0:3]
+                if a in X: X[a][b] = result['result'][i][3]
+                else:      X[a] = {b:result['result'][i][3]}
+        else: print(result['error'])
+    with gzip.GzipFile(result_path,'wb') as f:
+        pickle.dump(X,f)
+else:
+    K = {}
+    with gzip.GzipFile(result_path,'rb') as f:
+        X = pickle.load(f)
 #now you have to dig out each persons search to match up results

@@ -114,7 +114,6 @@ def star(s,c):
     return s,accum
 #-------------------------------------
 
-
 #sequence distances-----------------------
 def affine_sim(c1,c2,w=[0,1,1,0.9,0.05],s_pos=0):#match,miss,gap,space,scale
     u,v = len(c1),len(c2)
