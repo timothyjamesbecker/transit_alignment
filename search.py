@@ -629,9 +629,9 @@ def k_dis_paths(X,s_dist,k=5):
             print('finished all pairs LCSWT for t=%s'%t)
             for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])
             for i in range(1,k+1,1): #S_term(cost)+D_term(distance)
-                S[t] = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k-1.0))+(1.0-y[3])*(i-1.0)/(k-1.0))
+                S[t]  = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k-1.0))+(1.0-y[3])*(i-1.0)/(k-1.0))
                 K[t] += [S[t][0]]
-                S[t] = S[t][1:]
+                S[t]  = S[t][1:]
     return K
         #now we have the ldist matrix for the viable trips and the cost
 
@@ -648,7 +648,7 @@ X,P,min_rate = {},[],-3.0
 for i in sorted(persons):
     for j in range(len(persons[i])):
         can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist)
-        if can is not None and len(can[sorted(can)[0]]):
+        if can is not None and len(can[sorted(can)[0]])>0:
             print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
             si = list(can.keys())[0]
             candidates = can[si]
@@ -669,7 +669,6 @@ if len(P)%cpus>0:     partitions[-1] += P[-1*(len(P)%cpus):]
 result_path = d_base+'rts.result.pickle.gz'
 if not os.path.exists(result_path):
     print('starting || cython random tree search (RTS) computation')
-
     t_start = time.time()
     p1 = mp.Pool(processes=cpus)
     for i in range(len(partitions)):
