@@ -683,8 +683,8 @@ if not os.path.exists(result_path):
         if len(result['error'])<1:
             for i in range(len(result['result'])):
                 a,b,sid = result['result'][i][0:3]
-                if a in X: X[a][b] = result['result'][i][3]
-                else:      X[a] = {b:result['result'][i][3]}
+                if a in X: X[a][b] = result['result'][i][3:]
+                else:      X[a] = {b:result['result'][i][3:]}
         else: print(result['error'])
     with gzip.GzipFile(result_path,'wb') as f:
         pickle.dump(X,f)
@@ -693,3 +693,6 @@ else:
     with gzip.GzipFile(result_path,'rb') as f:
         X = pickle.load(f)
 #now you have to dig out each persons search to match up results
+#X[person][trip] = {t:[[],...[]]}
+#X[0][0][2] has some data....
+#ru.write_human_path

@@ -351,7 +351,7 @@ def trip_set_analysis(seqs,stops,idx):
     return E
 
 #write a TSV (with "" value quoting) from human readable form of paths
-def write_human_short_path(path,H):
+def write_human_path(path,H):
     s = '\t'.join(['person','trip','trip_sign','t_idx','stop_name','hr_min_sec','penalty_secs'])+'\n'
     for i in H:
         for j in H[i]:
