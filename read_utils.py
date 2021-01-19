@@ -349,17 +349,3 @@ def trip_set_analysis(seqs,stops,idx):
     t_stop = time.time()
     print('found %s trip pairs to exclude'%(len(E)))
     return E
-
-#write a TSV (with "" value quoting) from human readable form of paths
-def write_human_path(path,H):
-    s = '\t'.join(['person','trip','trip_sign','t_idx','stop_name','hr_min_sec','penalty_secs'])+'\n'
-    for i in H:
-        for j in H[i]:
-            for n in range(len(H[i][j])):
-                s += '\t'.join([str(i),str(j),'"%s"'%H[i][j][n][0],str(H[i][j][n][1]),
-                                '"%s"'%H[i][j][n][2],H[i][j][n][3],str(H[i][j][n][4])])+'\n'
-    with open(path,'w') as f:
-        f.write(s)
-        return True
-    return False
-

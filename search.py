@@ -635,6 +635,50 @@ def k_dis_paths(X,s_dist,k=5):
     return K
         #now we have the ldist matrix for the viable trips and the cost
 
+#convert a path to human readible path
+def path_to_human(person,trip,k,path):
+    H = []
+    for row in path:
+        if row[0]==-1:   tid = 'waiting'
+        elif row[0]==-2: tid = 'walking'
+        elif row[0]==-3: tid = 'driving'
+        else:            tid = trips[row[0]][1]
+        stop_name = s_names[stops[row[2]][0]]
+        h,m,s  = row[3]//(60*60),(row[3]%(60*60))//60,((row[3]%(60*60))%60)%60
+        s_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
+        h,m,s  = row[4]//(60*60),(row[4]%(60*60))//60,((row[4]%(60*60))%60)%60
+        p_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
+        H += [[person,trip,k,tid,row[1],stop_name,s_time,p_time]]
+    return H
+
+def get_human_paths(X): #k=0 => best path
+    H = {}
+    for i in X:
+        H[i] = {}
+        for j in X[i]: #all paths are index 0, k path are index 1
+            H[i][j] = []
+            person_k_paths = X[i][j][1]
+            for t in sorted(person_k_paths): #transfer number
+                if len(person_k_paths[t])>0:
+                    k_paths = person_k_paths[t] #0 is the path, 1 is the cost, 2 is the normalized cost => 0.0 is the lowest, 3 is the sum of pairs
+                    break
+            K = [x[0] for x in k_paths]
+            for k in range(len(K)):
+                H[i][j] += path_to_human(i,j,k,K[k])
+    return H
+
+def write_human_paths_tsv(path,H):
+    s = '\t'.join(['person','trip','k','trip_sign','t_idx','stop_name','stop_time','penalty_time'])+'\n'
+    for i in sorted(H):
+        for j in sorted(H[i]):
+            for n in range(len(H[i][j])):
+                s += '\t'.join([str(i),str(j),str(H[i][j][n][2]),'"%s"'%H[i][j][n][3],str(H[i][j][n][4]),
+                                '"%s"'%H[i][j][n][5],H[i][j][n][6],str(H[i][j][n][7])])+'\n'
+    with open(path,'w') as f:
+        f.write(s)
+        return True
+    return False
+
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['0:00','32:00']
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
@@ -689,9 +733,11 @@ if not os.path.exists(result_path):
     with gzip.GzipFile(result_path,'wb') as f:
         pickle.dump(X,f)
 else:
+    print('random tree search was already processed, loading data and writing human_results.tsv.gz')
     K = {}
     with gzip.GzipFile(result_path,'rb') as f:
         X = pickle.load(f)
+        H = write_human_paths_tsv(d_base+'human_results.tsv',get_human_paths(X))
 #now you have to dig out each persons search to match up results
 #X[person][trip] = {t:[[],...[]]}
 #X[0][0][2] has some data....
