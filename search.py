@@ -635,8 +635,41 @@ def k_dis_paths(X,s_dist,k=5):
     return K
         #now we have the ldist matrix for the viable trips and the cost
 
+def get_time_string(t):
+    hours   = t//(60*60)
+    minutes = (t%(60*60))//60
+    seconds = (t%(60*60))%60
+    return '%s:%s:%s'%(str(hours).zfill(2),str(minutes).zfill(2),str(seconds).zfill(2))
+
+def human_short_path(X,person,trip,persons,trips,s_names,verbose=True):
+    if verbose: print('detailing low cost human form for person=%s, trip=%s'%(person,trip))
+    cost,path = get_path(X,person,trip)
+    #path = [[tid,t_idx,sid,time,penalty]], tid=-1 is waitng, tid=-2 is walking
+    #trips = [trip_id,trip_sign,route_id,service_id,direction_id,shape_id]
+    H = []
+    if len(path)>0:
+        start = persons[person][trip][2]
+        start = start.hour*60*60+start.minute*60+start.second
+        start = ['walk',0,persons[person][trip][1],get_time_string(start),0]
+        end   = persons[person][trip][5]
+        end   = end.hour*60*60+end.minute*60+end.second
+        end   = ['walk',0,persons[person][trip][4],get_time_string(end),0]
+        H    += [start]
+        idx_s = {s_idx[s]:s for s in s_idx}
+        for i in range(len(path)): # trip headsign, t_idx
+            tid = path[i][0]
+            if tid==-1:   tname = 'wait'
+            elif tid==-2: tname = 'walk'
+            else:         tname = trips[path[i][0]][1]
+            if idx_s[path[i][2]] in s_names: sname = s_names[idx_s[path[i][2]]]
+            else:                            sname = 'NA'
+            element = [tname,path[i][1],sname,get_time_string(path[i][3]),path[i][4]]
+            H += [element]
+        H += [end]
+    return H
+
 #convert a path to human readible path
-def path_to_human(person,trip,k,path):
+def path_to_human(person,trip,k,path,s_names):
     H = []
     for row in path:
         if row[0]==-1:   tid = 'waiting'
@@ -651,20 +684,39 @@ def path_to_human(person,trip,k,path):
         H += [[person,trip,k,tid,row[1],stop_name,s_time,p_time]]
     return H
 
-def get_human_paths(X): #k=0 => best path
+def get_human_paths(X,C,persons,s_names): #k=0 => best path
     H = {}
     for i in X:
         H[i] = {}
         for j in X[i]: #all paths are index 0, k path are index 1
             H[i][j] = []
-            person_k_paths = X[i][j][1]
+            person_k_paths,k_paths = X[i][j][1],[]
             for t in sorted(person_k_paths): #transfer number
                 if len(person_k_paths[t])>0:
                     k_paths = person_k_paths[t] #0 is the path, 1 is the cost, 2 is the normalized cost => 0.0 is the lowest, 3 is the sum of pairs
                     break
             K = [x[0] for x in k_paths]
             for k in range(len(K)):
-                H[i][j] += path_to_human(i,j,k,K[k])
+                inner_path = path_to_human(i,j,k,K[k],s_names)
+                start = persons[i][j][2]
+                start = start.hour*60*60+start.minute*60+start.second
+                end   = persons[i][j][5]
+                end   = end.hour*60*60+end.minute*60+end.second
+                start_tid,start_t_idx,start_sid,start_s_time,start_pen = K[k][0]
+                end_tid,end_t_idx,end_sid,end_s_time,end_pen = K[k][-1]
+                service = sorted(C[i][j])[0]
+                for c in C[i][j][service]:
+                    if c[2]==start_tid and c[3]==start_t_idx: start_mode = c[0][0]
+                    if c[5][0]==end_sid:                      end_mode   = c[5][1]
+                if start_mode==-1:   start_mode_str = 'origin-wait'
+                elif start_mode==-2: start_mode_str = 'origin-walk'
+                elif start_mode==-3: start_mode_str = 'origin-drive'
+                if end_mode==-1:     end_mode_str   = 'destination-wait'
+                elif end_mode==-2:   end_mode_str   = 'destination-walk'
+                elif end_mode==-3:   end_mode_str   = 'destination-drive'
+                start_seq = [i,j,k,start_mode_str,0,persons[i][j][1],get_time_string(start),0]
+                end_seq   = [i,j,k,end_mode_str,0,persons[i][j][4],get_time_string(end),0]
+                H[i][j] += [start_seq]+inner_path+[end_seq]
     return H
 
 def write_human_paths_tsv(path,H):
@@ -681,6 +733,12 @@ def write_human_paths_tsv(path,H):
 
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['0:00','32:00']
+buff_time = 10
+max_time = 90
+walk_speed = 3
+bus_speed = 12
+drive_speed = 30
+
 D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
 persons = read_person_trip_list(d_base+'csts_11022020.txt')
 stops,s_idx,s_names,s_dist,w_dist,p_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist'],D['p_dist']
@@ -688,23 +746,30 @@ trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['cale
 service_ids = get_processed_service_ids(D)
 
 #person,i= 144 trip,j=0
-X,P,min_rate = {},[],-3.0
+X,P,C,min_rate = {},[],{},-3.0
 for i in sorted(persons):
+    C[i] = {}
     for j in range(len(persons[i])):
-        can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist)
+        C[i][j] = can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist,
+                                        buff_time=buff_time,max_time=max_time,walk_speed=walk_speed,
+                                        bus_speed=bus_speed,drive_speed=drive_speed)
         if can is not None and len(can[sorted(can)[0]])>0:
             print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
             si = list(can.keys())[0]
             candidates = can[si]
-            K = []
+            K,drv,wlk,wtg = [],0,0,0
             for c in candidates: #leave the trip direction filterin to the main algorithm
                 K += [(c[2],c[3],c[5][0],c[6],c[4])]
+                if c[0][0]==-3 or c[5][1]==-3:   drv += 1
+                elif c[0][0]==-2 or c[5][1]==-2: wlk += 1
+                elif c[0][0]==-1 or c[5][1]==-1: wtg += 1
+            if drv>0:
+                print('<<<<<<<<<<  %s driving candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(drv,i,j))
+                print('<<<<<<<<<<  %s walking candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wlk,i,j))
+                print('<<<<<<<<<<  %s waiting candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wtg,i,j))
             P += [[i,j,si,sorted(K,key=lambda x: x[4])[::-1]]]
-
-        # if not each_person: #pools the unique search possibilities....
-        #     for si in sorted(C):
-        #         print('processing %s'%si)
-        #         seqs,graph,l_dist,l_idx,trans = D[si]['seqs'],D[si]['graph'],D[si]['l_dist'],D[si]['l_idx'],D[si]['trans']
+        else:
+            print('person=%s,trip=%s was not valid on %s...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
 
 cpus = mp.cpu_count()
 partitions,n = [],len(P)//cpus
@@ -716,7 +781,7 @@ if not os.path.exists(result_path):
     t_start = time.time()
     p1 = mp.Pool(processes=cpus)
     for i in range(len(partitions)):
-        p1.apply_async(get_seq_paths,args=(partitions[i],3,[1.0,1.0,0.5,0.25],-3.0),callback=collect_results)
+        p1.apply_async(get_seq_paths,args=(partitions[i],4,[1.0,1.0,0.5,0.25],-3.0),callback=collect_results)
     p1.close()
     p1.join()
     t_stop = time.time()
@@ -737,7 +802,9 @@ else:
     K = {}
     with gzip.GzipFile(result_path,'rb') as f:
         X = pickle.load(f)
-        H = write_human_paths_tsv(d_base+'human_results.tsv',get_human_paths(X))
+        H = get_human_paths(X,C,persons,s_names)
+        write_human_paths_tsv(d_base+'human_results.tsv',H)
+
 #now you have to dig out each persons search to match up results
 #X[person][trip] = {t:[[],...[]]}
 #X[0][0][2] has some data....
