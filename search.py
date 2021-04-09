@@ -733,7 +733,7 @@ def write_human_paths_tsv(path,H):
 
 n_base,d_base = 'ha_network/','ha_demand/'
 search_time = ['0:00','32:00']
-buff_time = 10
+buff_time = 20
 max_time = 90
 walk_speed = 3
 bus_speed = 12
