@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import time
@@ -128,7 +129,9 @@ def get_search_time(base_time,buff_time=10,symetric=True):
     return search_time
 
 #buff_time is in minutes, walking speed is in mi/hour, start with forwar search only...
-def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_time=90,walk_speed=3,bus_speed=12,drive_speed=30):
+def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10.0,max_time=90.0,
+                    walk_speed=3.0,bus_speed=12.0,drive_speed=30.0,min_target=1000,heading_limit=True):
+    final_candidates = None
     w_secs = (60.0*60.0)/walk_speed  #time walking in seconds => seconds/mi
     p_secs = (60.0*60.0)/drive_speed #time driving in seconds => seconds/mi
     dt = get_datetime(person_trip)
@@ -174,17 +177,20 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_tim
         candidate_trips,c_i = [],0
         for c in od_search:
             o,d,e,time_max = c[0][0],c[0][1],c[1],c[2] #origin stop, destination stop and distance estimate
-            if o in wods['o']:
-                owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
+            if o in wods['o'] and d in wods['d']:
+                owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get to the stop in seconds
+                dwt = int(round(wods['d'][d]*w_secs+0.5)) #walking time to get to the dest in seconds
                 s_time = [search_time[0]+owt,search_time[1]+owt]
                 if o in graph:
                     for i in range(len(graph[o]['out'])):
                         if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                             tid = graph[o]['out'][i][2:]
-                            candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
-                            candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
+                            candidate_trip = [(-2,o,owt),graph[o]['out'][i][1]]+list(tid)
+                            candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-2,dwt),time_max]]
             c_i += 1
         candidate_trips = sorted(candidate_trips,key=lambda x: (x[1],-1*x[4],x[6]))
+        l_can = len(candidate_trips)
+        #drive-transit-walk or walk-transit-drive searching...
         if len(candidate_trips)<1:
             print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
             #check o_taz->(p_dist) d_taz->(p_dist)
@@ -219,34 +225,59 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10,max_tim
             candidate_trips,c_i = [],0
             for c in od_search:
                 o,d,e,time_max = c[0][0],c[0][1],c[1],c[2] #origin stop, destination stop and distance estimate
-                if o in wods['o']:
+                if o in wods['o'] and d in pods['d']:
                     owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
+                    dpt = int(round(pods['d'][d]*p_secs+0.5)) #walking time to get the stop in seconds
                     s_time = [search_time[0]+owt,search_time[1]+owt]
                     if o in graph:
                         for i in range(len(graph[o]['out'])):
                             if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                                 tid = graph[o]['out'][i][2:]
-                                candidate_trip = [(-1,o),graph[o]['out'][i][1]]+list(tid)
-                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-3),time_max]]
-                elif o in pods['o']:
-                    owt = int(round(pods['o'][o]*p_secs+0.5))
-                    s_time = [search_time[0]+owt,search_time[1]+owt]
+                                candidate_trip = [(-2,o,owt),graph[o]['out'][i][1]]+list(tid)
+                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-3,dpt),time_max]]
+                elif o in pods['o'] and d in wods['d']:
+                    opt = int(round(pods['o'][o]*p_secs+0.5))
+                    dwt = int(round(wods['d'][d]*w_secs+0.5))
+                    s_time = [search_time[0]+opt,search_time[1]+opt]
                     if o in graph:
                         for i in range(len(graph[o]['out'])):
                             if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                                 tid = graph[o]['out'][i][2:]
-                                candidate_trip = [(-3,o),graph[o]['out'][i][1]]+list(tid)
-                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-1),time_max]]
+                                candidate_trip = [(-3,o,opt),graph[o]['out'][i][1]]+list(tid)
+                                candidate_trips  += [candidate_trip+[sdist_trip_trend(tid[0],tid[1],d,seqs,s_dist,time_max),(d,-2,dwt),time_max]]
                 c_i += 1
             candidate_trips = sorted(candidate_trips,key=lambda x: (x[1],-1*x[4],x[6]))
-            if len(candidate_trips)<1:
-                print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
-                return None
-        return {'service_id_%s'%service_id:candidate_trips}
-    else:
+            l_can = len(candidate_trips)
+        if len(candidate_trips)<1:
+            print('empty walking candidates for person trip:%s'%[o_taz,d_taz,service_id])
+        else:
+            print('o_taz=%s, d_taz=%s and service_id=%s for person trip generated %s candidate pairs'%\
+                  (o_taz,d_taz,service_id,len(candidate_trips)))
+
+        if heading_limit: #filter those trips that are in the opposite direction at walking speed or faster!
+            for i in range(len(candidate_trips)):
+                if candidate_trips[i][4]<-1*walk_speed: break
+            j = i
+            if i<min_target: j = min(len(candidate_trips),min_target)
+            some_trips = candidate_trips[:i]
+            can_idx = np.arange(i,len(candidate_trips),1) #left over trips to get sampled
+            can_pr  = can_idx-i+1.0
+            can_pr  /= np.sum(can_pr)
+            can_pr  = can_pr[::-1]
+            if j-i>0:
+                ran_idx = sorted(np.random.choice(can_idx,j-i,replace=False,p=can_pr))
+                ran_trips = []
+                for x in ran_idx: ran_trips += [candidate_trips[x]]
+                some_trips += ran_trips
+            candidate_trips = sorted(some_trips,key=lambda x: -1*x[4])
+
+        print('%s candidates were filtered, %s candidates remain'%\
+              (l_can-len(candidate_trips),len(candidate_trips)))
+        final_candidates = {'service_id_%s'%service_id:candidate_trips}
+    else: #no single driving trips (drive-tranist-walk or walk-transit->drive)
         if service_id is None: print('service_id was not found for date=%s'%dt[0])
         else:                  print('empty park+walk candidates for person trip:%s'%[o_taz,d_taz,service_id])
-        return None
+    return final_candidates
 
 #miles per hours twords your destination using the minimum (of all stops)
 #stop to stop distance and time bounded by destination time-destination walk time
@@ -333,7 +364,7 @@ def path_time_score(trip,c_time):
     if len(trip)>0:
         return sum([trip[i][4] for i in range(len(trip))])
 
-def reduce_trans(trans,pw={-1:10*60,-2:20*60}):
+def reduce_trans(trans,pw={-1:10*60,-2:20*60,-3:10*60}):
     T = {}
     for t in trans:
         T[t] = {}
@@ -419,7 +450,7 @@ def update_paths(K,D,S,L,s_dist,k=5):
 # random tree search algorithm: RTS for K dissimiliar short paths (RKDSP)
 # tid,tdx is the trip at a stop, sid is the destination
 # T+F,seqs,pw are the tree,fwd_stops,seq and penalties
-def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.25]):
+def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.25]):
     start = time.time()
     K,D,S = {i:[] for i in range(t_max+1)},{i:{} for i in range(t_max+1)},{i:{} for i in range(t_max+1)}
     for c in C:
@@ -476,13 +507,23 @@ def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.
     print('searched for max_trans=%s in %s sec'%(t_max,round(stop-start,2)))
     return K,D,S
 
-def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0,verbose=True):
+#compute penalties by seconds and mode: w*secs
+def penalty(secs,mode,coeff={0:1.0,-1:1.1,-2:1.5,-3:1.1},offset={0:0,-1:10*60,-2:20*60,-3:20*60}):
+    return coeff[mode]*secs + offset[mode]
+
+#can add more nuanced penalties: pw{0:lambda x: x
+def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
+             min_paths=5,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],
+             min_rate=-3.0,add_od=True,verbose=True):
     t_start = time.time()
     X,z = {i:{} for i in range(max_trans+1)},0
     for i in range(len(C)):
-        s0,sid,max_time = (C[i][0],C[i][1]),C[i][2],C[i][3]
+        s0,sid,max_time = (C[i][0],C[i][1]),C[i][2],C[i][3] #add the origin section here and when finished the destination
+        origin,dest,init_time = C[i][-1][0],C[i][-1][2],C[i][-1][1]
+        max_time -= dest[2] #correct for the walk time to get to the destinantion
         if s0[0:2] in F and sid in F[s0[0:2]]:
             L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
+            if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
             Y  = np.array(L,dtype=np.int32)
             v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
             if v in X[0]: X[0][v][tuple(set(Y[:,2]))] = Y
@@ -494,6 +535,7 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
                     L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
                     L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
+                    if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                     Y  = np.array(L,dtype=np.int32)                                         #np array
                     v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
                     if v in X[1]: X[1][v][tuple(set(Y[:,2]))] = Y
@@ -507,6 +549,7 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                             L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
                             L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
                             L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
+                            if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                             Y  = np.array(L,dtype=np.int32)                                         #np array
                             v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
                             if v in X[2]: X[2][v][tuple(set(Y[:,2]))] = Y
@@ -522,6 +565,7 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                                     L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
                                     L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
                                     L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
+                                    if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                                     Y  = np.array(L,dtype=np.int32)                                         #np array
                                     v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
                                     if v in X[3]: X[3][v][tuple(set(Y[:,2]))] = Y
@@ -539,14 +583,43 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60},min_paths=1,max_trans=4,trans
                                             L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
                                             L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
                                             L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
+                                            if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                                             Y  = np.array(L,dtype=np.int32)                                         #np array
                                             v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
                                             if v in X[4]: X[4][v][tuple(Y[:,2])] = Y
                                             else:         X[4][v] = {tuple(Y[:,2]):Y}
-                                        z += 1
+                                        elif len(X[4])<min_paths and max_trans>4: #if len(X[2])<1
+                                            z += 1
+                                            for a5,s5 in sample_branches(T,seqs,s4,trans_p[4],max_time,s_dist,sid,min_rate+1.0):
+                                                if s5[0:2] in F and sid in F[s5[0:2]]:
+                                                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
+                                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                                    L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
+                                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                                    L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
+                                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                                    L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
+                                                    L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                                    L += sub_seq_leg(seqs,s4[0],s4[1],seqs[s4[0]][a5][0],pw)                #before transfer-5
+                                                    L += [[s5[2],0,seqs[s5[0]][s5[1]][0],seqs[s5[0]][s5[1]][1],pw[s5[2]]]]  #transfer-5
+                                                    L += sub_seq_leg(seqs,s5[0],s5[1],sid,pw)                               #before destination
+                                                    if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
+                                                    Y  = np.array(L,dtype=np.int32)                                         #np array
+                                                    v  = (Y[-1][3]-Y[0][3])+np.sum(Y[:,4])
+                                                    if v in X[5]: X[5][v][tuple(Y[:,2])] = Y
+                                                    else:         X[5][v] = {tuple(Y[:,2]):Y}
+                                                z += 1
     t_stop = time.time()
     if verbose: print('tree searched %s edges with %s paths in %s sec'%(z,[len(X[x]) for x in X],round(t_stop-t_start)))
     return X
+
+def multi_core_lcs(P,S,s_dist):
+    R = []
+    for p in P:
+        t,i,j = p[0],p[1],p[2]
+        l = tu.lcs(S[t][i][0][:,2:],S[t][j][0][:,2:],s_dist)
+        R += [[t,i,j,l]]
+    return R
 
 #get lowest cost
 def get_path(X,person,trip,method='low-cost'):
@@ -586,8 +659,8 @@ result_list = []
 def collect_results(result):
     result_list.append(result)
 
-def get_seq_paths(C,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0):
-    X = {'error':[],'result':[]}
+def get_seq_paths(out_path,C,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],min_rate=-3.0):
+    X = {'error':[]}
     for i in range(len(C)):
         try:
             si = C[i][2]
@@ -598,11 +671,12 @@ def get_seq_paths(C,max_trans=4,trans_p=[1.0,1.0,0.5,0.25],min_rate=-3.0):
                     if (l[0],l[1]) not in F: #tid,tdx
                         F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
             R = RTS_FULL(C[i][3],T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
-            X['result'] += [[C[i][0],C[i][1],C[i][2],R,k_dis_paths(R,s_dist,k=5)]]
+            Y = {'person':C[i][0],'trip':C[i][1],'service_id':C[i][2],'paths':R}
+            with gzip.GzipFile(out_path+'person_%s.trip_%s.pickle.gz'%(C[i][0],C[i][1]), 'wb') as f: pickle.dump(Y,f)
         except Exception as E: X['error'] += [str(E)]
     return X
 
-def k_dis_paths(X,s_dist,k=5):
+def k_dis_paths(X,s_dist,k=5,verbose=False):
     #unpack the cost keys to seq tuples
     S,K = {},{}
     for t in X:
@@ -616,17 +690,17 @@ def k_dis_paths(X,s_dist,k=5):
             if dif>0.0:
                 for i in range(len(S[t])): S[t][i][2] = (S[t][i][1]-off)/dif
     for t in S:
-        print('t=%s'%t)
+        if verbose: print('t=%s'%t)
         SP,K[t],D = [],[],np.zeros((len(S[t]),len(S[t])),dtype=np.float32) #LCSWT harmonic mean distance from 0.0 to 1.0
         if len(S[t])>k: #k=1 is just lowest cost path
             x = 1
             for i in range(len(S[t])):         #calculate upper triangle
-                if i%10==0: print('t=%s i=%s'%(t,i))
+                if verbose and i%10==0: print('t=%s i=%s'%(t,i))
                 for j in range(x,len(S[t]),1): #and copy to lower triangle
                     l = tu.lcs(S[t][i][0][:,2:],S[t][j][0][:,2:],s_dist)
                     D[i][j] = D[j][i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
                 x += 1
-            print('finished all pairs LCSWT for t=%s'%t)
+            if verbose: print('finished all pairs LCSWT for t=%s'%t)
             for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])
             for i in range(1,k+1,1): #S_term(cost)+D_term(distance)
                 S[t]  = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k-1.0))+(1.0-y[3])*(i-1.0)/(k-1.0))
@@ -640,6 +714,18 @@ def get_time_string(t):
     minutes = (t%(60*60))//60
     seconds = (t%(60*60))%60
     return '%s:%s:%s'%(str(hours).zfill(2),str(minutes).zfill(2),str(seconds).zfill(2))
+
+def abbreviated_path(path):
+    ps = [list(x) for x in path[0:2]]
+    for i in range(2,len(path)-2,1):
+        if path[i][0]==-1 or path[i][0]==-2:
+            ps += [list(path[i-1])]
+            ps += [list(path[i])]
+            ps += [list(path[i+1])]
+            i  += 1
+    ps += [list(x) for x in path[-2:]]
+    ps = np.array(ps,dtype=np.int32)
+    return ps
 
 def human_short_path(X,person,trip,persons,trips,s_names,verbose=True):
     if verbose: print('detailing low cost human form for person=%s, trip=%s'%(person,trip))
@@ -684,39 +770,30 @@ def path_to_human(person,trip,k,path,s_names):
         H += [[person,trip,k,tid,row[1],stop_name,s_time,p_time]]
     return H
 
-def get_human_paths(X,C,persons,s_names): #k=0 => best path
+def get_human_paths(X,persons,s_names,abbreviate=False): #k=0 => best path
     H = {}
     for i in X:
         H[i] = {}
         for j in X[i]: #all paths are index 0, k path are index 1
             H[i][j] = []
-            person_k_paths,k_paths = X[i][j][1],[]
+            person_k_paths,k_paths = X[i][j],[]
             for t in sorted(person_k_paths): #transfer number
-                if len(person_k_paths[t])>0:
-                    k_paths = person_k_paths[t] #0 is the path, 1 is the cost, 2 is the normalized cost => 0.0 is the lowest, 3 is the sum of pairs
+                if len(person_k_paths[t])>0: #0 is the path, 1 is the cost, 2 is the normalized cost => 0.0 is the lowest, 3 is the sum of pairs
+                    k_paths = person_k_paths[t]
                     break
             K = [x[0] for x in k_paths]
             for k in range(len(K)):
+                if abbreviate: K[k] = abbreviated_path(K[k])
                 inner_path = path_to_human(i,j,k,K[k],s_names)
-                start = persons[i][j][2]
-                start = start.hour*60*60+start.minute*60+start.second
-                end   = persons[i][j][5]
-                end   = end.hour*60*60+end.minute*60+end.second
-                start_tid,start_t_idx,start_sid,start_s_time,start_pen = K[k][0]
-                end_tid,end_t_idx,end_sid,end_s_time,end_pen = K[k][-1]
-                service = sorted(C[i][j])[0]
-                for c in C[i][j][service]:
-                    if c[2]==start_tid and c[3]==start_t_idx: start_mode = c[0][0]
-                    if c[5][0]==end_sid:                      end_mode   = c[5][1]
-                if start_mode==-1:   start_mode_str = 'origin-wait'
-                elif start_mode==-2: start_mode_str = 'origin-walk'
-                elif start_mode==-3: start_mode_str = 'origin-drive'
-                if end_mode==-1:     end_mode_str   = 'destination-wait'
-                elif end_mode==-2:   end_mode_str   = 'destination-walk'
-                elif end_mode==-3:   end_mode_str   = 'destination-drive'
-                start_seq = [i,j,k,start_mode_str,0,persons[i][j][1],get_time_string(start),0]
-                end_seq   = [i,j,k,end_mode_str,0,persons[i][j][4],get_time_string(end),0]
-                H[i][j] += [start_seq]+inner_path+[end_seq]
+                origin = inner_path[0]
+                dest   = inner_path[-1]
+                start  = persons[i][j][1]
+                end    = persons[i][j][4]
+                origin[3] = 'origin-'+origin[3]
+                origin[5] = start
+                dest[3]   = 'destination-'+dest[3]
+                dest[5]   = end
+                H[i][j] += inner_path
     return H
 
 def write_human_paths_tsv(path,H):
@@ -731,81 +808,266 @@ def write_human_paths_tsv(path,H):
         return True
     return False
 
-n_base,d_base = 'ha_network/','ha_demand/'
-search_time = ['0:00','32:00']
-buff_time = 20
-max_time = 90
-walk_speed = 3
-bus_speed = 12
-drive_speed = 30
+if __name__ == '__main__':
+    des = """K dissimiliar Paths Random Tree Trip Search (KD-LCSWT-RTS), Copyright (C) 2020-2021 Timothy James Becker
+    Random importance sampling of transfers with Longest Common Subsequence With Transfer Correction Metric"""
+    parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--net_dir',type=str,help='network directory base path\t[None]')
+    parser.add_argument('--demand_path',type=str,help='demand file path\t[None]')
+    parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
+    #filtering and limiting of search-----------------------------------------------------------------------------------------
+    parser.add_argument('--time_range',type=str,help='search time range in hours\t[0:00-32:00]')
+    parser.add_argument('--buff_time',type=float,help='maximum time in minutes to wait or walk at any leg of trip\t[20.0]')
+    parser.add_argument('--max_time',type=float,help='maximum time in minutes for the total trip\t[90.0]')
+    parser.add_argument('--max_trans',type=int,help='maximum number of transfers to search for (can go up to 5)\t[4]')
+    parser.add_argument('--trans_prop',type=str,help='sample proportion for transfer paths\t[1.0,0.5,0.25,0.125]')
+    parser.add_argument('--heading_limit',type=int,help='cutoff value in mph for initial od access/egress candidates\t[-3.0]')
+    # initial conditions for search-------------------------------------------------------------------------------------------
+    parser.add_argument('--walk_speed',type=float,help='average walking speed in mph\t[3.0]')
+    parser.add_argument('--bus_speed',type=float,help='average bus speed in mph for calculate heading vector estimate\t[15.0]')
+    parser.add_argument('--drive_speed',type=float,help='average driving speed in mph to get to park and ride or home\t[30.0]')
+    parser.add_argument('--k_lim',type=int,help='the maximum number of discrete paths per transfer before sampling occurs in the k-path calculation\t[500]')
+    parser.add_argument('--k_value',type=int,help='the maximum number of paths to calculate per transfer\t[5]')
+    parser.add_argument('--abbreviate',action='store_true',help='abbreviate the final paths so only include tranfer points\t[False]')
+    parser.add_argument('--cpus',type=int,help='number of cpus to use\t[1]')
+    # parser.add_argument('--test',action='store_true',help='')
+    args = parser.parse_args()
 
-D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
-persons = read_person_trip_list(d_base+'csts_11022020.txt')
-stops,s_idx,s_names,s_dist,w_dist,p_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist'],D['p_dist']
-trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
-service_ids = get_processed_service_ids(D)
+    if args.net_dir is not None:
+        n_base = args.net_dir
+    else: raise IOError
+    if args.demand_path is not None:
+        d_path = args.demand_path
+        d_base = '/'.join(d_path.rsplit('/')[:-2])+'/'
+    else: raise IOError
+    if args.out_dir is not None:
+        out_dir = args.out_dir
+    else: raise IOError
+    if args.time_range is not None:
+        search_time = args.time_range.rsplit(',')
+    else:
+        search_time = ['0:00','32:00']
+    if args.buff_time is not None:
+        buff_time = args.buff_time
+    else:
+        buff_time = 20.0
+    if args.max_time is not None:
+        max_time = args.buff_time
+    else:
+        max_time = 90.0
+    if args.walk_speed is not None:
+        walk_speed = args.walk_speed
+    else:
+        walk_speed = 3.0
+    if args.bus_speed is not None:
+        bus_speed = args.bus_speed
+    else:
+        bus_speed = 15.0
+    if args.drive_speed is not None:
+        drive_speed = args.drive_speed
+    else:
+        drive_speed = 30.0
+    if args.max_trans is not None:
+        max_trans = args.max_trans
+    else:
+        max_trans = 4
+    if args.trans_prop is not None:
+        trans_prop = [float(x) for x in args.tras_prop.rsplit(',')]
+    else:
+        trans_prop = [1.0,0.5,0.25,0.125,0.0625] #divid by 2 per transfer leve in the search tree
+    if args.heading_limit is not None:
+        heading_limit = args.heading_limit
+    else:
+        heading_limit = -3.0
+    if args.k_lim is not None:
+        k_lim = args.k_lim
+    else:
+        k_lim = 500
+    if args.k_value is not None:
+        k_value = args.k_value
+    else:
+        k_value = 5
+    if args.cpus is not None:
+        cpus = args.cpus
+    else:
+        cpus = 1
 
-#person,i= 144 trip,j=0
-X,P,C,min_rate = {},[],{},-3.0
-for i in sorted(persons):
-    C[i] = {}
-    for j in range(len(persons[i])):
-        C[i][j] = can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist,
-                                        buff_time=buff_time,max_time=max_time,walk_speed=walk_speed,
-                                        bus_speed=bus_speed,drive_speed=drive_speed)
-        if can is not None and len(can[sorted(can)[0]])>0:
-            print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
-            si = list(can.keys())[0]
-            candidates = can[si]
-            K,drv,wlk,wtg = [],0,0,0
-            for c in candidates: #leave the trip direction filterin to the main algorithm
-                K += [(c[2],c[3],c[5][0],c[6],c[4])]
-                if c[0][0]==-3 or c[5][1]==-3:   drv += 1
-                elif c[0][0]==-2 or c[5][1]==-2: wlk += 1
-                elif c[0][0]==-1 or c[5][1]==-1: wtg += 1
-            if drv>0:
-                print('<<<<<<<<<<  %s driving candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(drv,i,j))
-                print('<<<<<<<<<<  %s walking candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wlk,i,j))
-                print('<<<<<<<<<<  %s waiting candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wtg,i,j))
-            P += [[i,j,si,sorted(K,key=lambda x: x[4])[::-1]]]
+    D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
+    persons = read_person_trip_list(d_path)
+    stops,s_idx,s_names,s_dist,w_dist,p_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist'],D['p_dist']
+    trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
+    service_ids = get_processed_service_ids(D)
+
+    #[1] generate candidates and then run [2] || RST
+    if len(glob.glob(out_dir+'/person*trip*.pickle.gz'))<=0:
+        #person,i= 144 trip,j=0
+        X,P,C = {},[],{}
+        for i in sorted(persons):
+            C[i] = {}
+            for j in range(len(persons[i])):
+                C[i][j] = can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist,
+                                                buff_time=buff_time,max_time=max_time,walk_speed=walk_speed,
+                                                bus_speed=bus_speed,drive_speed=drive_speed)
+                if can is not None and len(can[sorted(can)[0]])>0:
+                    print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+                    si = list(can.keys())[0]
+                    candidates = can[si]
+                    K,drv,wlk,wtg = [],0,0,0
+                    for c in candidates: #leave the trip direction filterin to the main algorithm
+                        K += [(c[2],c[3],c[5][0],c[6],c[4],[c[0],c[1],c[5]])]  #
+                        if c[0][0]==-3 or c[5][1]==-3:   drv += 1
+                        elif c[0][0]==-2 or c[5][1]==-2: wlk += 1
+                        elif c[0][0]==-1 or c[5][1]==-1: wtg += 1
+                    if drv>0:
+                        print('<<<<<<<<<<  %s driving candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(drv,i,j))
+                        print('<<<<<<<<<<  %s walking candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wlk,i,j))
+                        print('<<<<<<<<<<  %s waiting candidates were found for person=%s,trip=%s  >>>>>>>>>>'%(wtg,i,j))
+                    P += [[i,j,si,sorted(K,key=lambda x: x[4])[::-1]]]
+                else:
+                    print('person=%s,trip=%s was not valid on %s...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
+
+        #partitioning by sorted candidate number (pack by largest first and interleve over cpus...)
+        cpus = min(cpus,mp.cpu_count())
+        partitions = [[] for x in range(cpus)]
+        P = sorted(P,key=lambda x: len(x[3]))[::-1] #sort by the number of candidates to search
+        for i in range(len(P)):
+            partitions[i%cpus] += [P[i]]
+
+        if not os.path.exists(out_dir): os.mkdir(out_dir)
+        result_path = out_dir+'rts.result.pickle.gz'
+        print('starting || cython random tree search (RTS) computation')
+        t_start = time.time()
+        p1 = mp.Pool(processes=cpus)
+        for i in range(len(partitions)):
+            p1.apply_async(get_seq_paths,
+                           args=(out_dir,partitions[i],max_trans,trans_prop,heading_limit),
+                           callback=collect_results)
+        p1.close()
+        p1.join()
+        t_stop = time.time()
+        print('completed in %s minutes'%round((t_stop-t_start)/60,2))
+        result_list = []
+
+    if len(glob.glob(out_dir + '/k%s*person*trip*.pickle.gz'%k_value))<=0:
+        #[3] now we run for each person/trip the LCSWT in || to maximize cpu utilization
+        P,verbose = [],False
+        for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz')):
+            base_dir = '/'.join(path.rsplit('/')[:-1])+'/'
+            person   = int(path.rsplit('/')[-1].rsplit('.')[0].rsplit('person_')[-1])
+            trip     = int(path.rsplit('/')[-1].rsplit('.')[1].rsplit('trip_')[-1])
+            print('working on person=%s, trip=%s'%(person,trip))
+            with gzip.GzipFile(path,'rb') as fr:
+                D = pickle.load(fr)
+                person     = D['person']
+                trip       = D['trip']
+                service_id = D['service_id']
+                X          = D['paths']
+            print('loaded prexisting RST search data for person=%s, trip=%s and service_id=%s'%(person,trip,service_id))
+            # k_dis_paths(X,s_dist,k=5,verbose=False):
+            S,K = {},{}
+            for t in X:
+                S[t] = []
+                for v in X[t]:
+                    for s in X[t][v]: S[t] += [[X[t][v][s],v,0.0,0.0]]
+                S[t] = sorted(S[t],key=lambda x: x[1])
+                if len(S[t])>1:
+                    off = min([S[t][i][1] for i in range(len(S[t]))])
+                    dif = max([S[t][i][1] for i in range(len(S[t]))])-off
+                    if dif>0.0:
+                        for i in range(len(S[t])): S[t][i][2] = (S[t][i][1]-off)/dif
+            #use klim to downsample paths proportional to cost-------------------------------------
+            for t in S:
+                SL = []
+                if len(S[t])>k_lim:
+                    print('using k_lim=%s on trans=%s to reduce large numbers of high cost paths'%(k_lim,t))
+                    s_prop = np.arange(1.0,len(S[t]),1)[::-1]
+                    s_prop /= np.sum(s_prop)
+                    s_idx = [0]+sorted(list(np.random.choice(range(1,len(S[t])),k_lim-1,replace=False,p=s_prop)))
+                    for idx in s_idx: SL += [S[t][idx]]
+                    S[t] = SL
+            L = []
+            for t in S:
+                x = 1
+                for i in range(len(S[t])):
+                    for j in range(x,len(S[t]),1):
+                        L += [[t,i,j,len(S[t][i][0][:,2:-1])*len(S[t][j][0][:,2:-1])]]
+                    x += 1
+            L = sorted(L,key=lambda x: x[3])[::-1] # sort by higest edit distance computation cost
+
+            cpus = min(cpus,mp.cpu_count())
+            partitions = [[] for x in range(cpus)]
+            for i in range(len(L)): partitions[i%cpus] += [L[i]]
+            print('computing %s LCSWT pairs using %s cpu partitions for %s'%(len(L),cpus,path))
+
+            result_list = []
+            t_start = time.time()
+            p2 = mp.Pool(processes=cpus)
+            for i in range(len(partitions)):
+                p2.apply_async(multi_core_lcs,
+                               args=(partitions[i],S,s_dist),
+                               callback=collect_results)
+            p2.close()
+            p2.join()
+            t_stop = time.time()
+            print('|| LCSWT for %s completed in %s minutes'%(path,round((t_stop-t_start)/60,2)))
+            print('performance: %s LCSWT pairs/sec'%(int(len(L)/(t_stop-t_start))))
+
+            #unpack the per cpu result list---------------------------------------
+            L = {}
+            for result in result_list:
+                for row in result:
+                    t,i,j,l = row
+                    if t in L:
+                        if i in L[t]: L[t][i][j] = l
+                        else:         L[t][i] = {j:l}
+                    else:             L[t] = {i:{j:l}}
+            #----------------------------------------------------------------------
+
+            for t in S:
+                SP,K[t],D = [],[],np.zeros((len(S[t]),len(S[t])),dtype=np.float32) #LCSWT harmonic mean distance from 0.0 to 1.0
+                if len(S[t])>k_value: #k=1 is just lowest cost path
+                    #-------------------------------------------------------------------------------------
+                    x = 1
+                    for i in range(len(S[t])):         #calculate upper triangle
+                        for j in range(x,len(S[t]),1): #and copy to lower triangle
+                            l = L[t][i][j]
+                            D[i][j] = D[j][i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
+                        x += 1
+                    #--------------------------------------------------------------------------------------
+                    for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])
+                    for i in range(1,k_value+1,1): #S_term(cost)+D_term(distance)
+                        S[t]  = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k_value-1.0))+(1.0-y[3])*(i-1.0)/(k_value-1.0))
+                        K[t] += [S[t][0]]
+                        S[t]  = S[t][1:]
+            #save the K paths pickles for each to reduce memory
+            with gzip.GzipFile(out_dir+'/k%s_person%s_trip%s.pickle.gz'%(k_value,person,trip),'wb') as fk:
+                pickle.dump(K,fk)
+
+    if len(glob.glob(out_dir+'/k%s_human_results.tsv'%k_value))<=0:
+        X = {}
+        for k_path in sorted(glob.glob(out_dir+'/k%s*person*trip*.pickle.gz'%k_value)):
+            with gzip.GzipFile(k_path,'rb') as fk:
+                k_check = False
+                try:
+                    k_check = k_value==int(k_path.rsplit('/')[-1].rsplit('k')[1].rsplit('_')[0])
+                except: pass
+                person = -1 #not in a set of enumerations since they start at 0
+                try:
+                    person = int(k_path.rsplit('/')[-1].rsplit('_')[1].rsplit('person')[1])
+                except: pass
+                trip = -1 #not in a set of enumerations since they start at 0
+                try:
+                    trip = int(k_path.rsplit('/')[-1].rsplit('.')[0].rsplit('trip')[1])
+                except: pass
+                if person in persons and trip in range(len(persons[person])):
+                    print('located data for person=%s, trip=%s'%(person,trip))
+                    if person not in X: X[person] = {}
+                    if trip not in X[person]: X[person][trip] = {}
+                    X[person][trip] = pickle.load(fk)
+        H = get_human_paths(X,persons,s_names,abbreviate=not args.abbreviate)
+        if args.abbreviate:
+            print('converted all k-paths, writing file to disk:%s'%(out_dir+'/k%s_human_results_abbr.tsv'%k_value))
+            write_human_paths_tsv(out_dir+'/k%s_human_results_abbr.tsv'%k_value,H)
         else:
-            print('person=%s,trip=%s was not valid on %s...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
-
-cpus = mp.cpu_count()
-partitions,n = [],len(P)//cpus
-for i in range(cpus): partitions     += [P[i*n:(i+1)*n]]
-if len(P)%cpus>0:     partitions[-1] += P[-1*(len(P)%cpus):]
-result_path = d_base+'rts.result.pickle.gz'
-if not os.path.exists(result_path):
-    print('starting || cython random tree search (RTS) computation')
-    t_start = time.time()
-    p1 = mp.Pool(processes=cpus)
-    for i in range(len(partitions)):
-        p1.apply_async(get_seq_paths,args=(partitions[i],4,[1.0,1.0,0.5,0.25],-3.0),callback=collect_results)
-    p1.close()
-    p1.join()
-    t_stop = time.time()
-    print(result_list)
-
-    X,K = {},{}
-    for result in result_list:
-        if len(result['error'])<1:
-            for i in range(len(result['result'])):
-                a,b,sid = result['result'][i][0:3]
-                if a in X: X[a][b] = result['result'][i][3:]
-                else:      X[a] = {b:result['result'][i][3:]}
-        else: print(result['error'])
-    with gzip.GzipFile(result_path,'wb') as f:
-        pickle.dump(X,f)
-else:
-    print('random tree search was already processed, loading data and writing human_results.tsv.gz')
-    K = {}
-    with gzip.GzipFile(result_path,'rb') as f:
-        X = pickle.load(f)
-        H = get_human_paths(X,C,persons,s_names)
-        write_human_paths_tsv(d_base+'human_results.tsv',H)
-
-#now you have to dig out each persons search to match up results
-#X[person][trip] = {t:[[],...[]]}
-#X[0][0][2] has some data....
-#ru.write_human_path
+            print('converted all k-paths, writing file to disk:%s'%(out_dir+'/k%s_human_results.tsv'%k_value))
+            write_human_paths_tsv(out_dir+'/k%s_human_results.tsv'%k_value,H)
