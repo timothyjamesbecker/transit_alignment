@@ -1,5 +1,6 @@
 import argparse
 import os
+import copy
 import sys
 import time
 import datetime
@@ -82,16 +83,19 @@ def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want
     return ps
 
 #will load cached data or if not present, generate it
-def load_network_data(n_base,walk=0.5,search_date=None,search_time=[0,115200]):
+def load_network_data(n_base,walk=0.5,search_time=[0,115200],search_date=None,target_cpus=None):
     if os.path.exists(n_base+'/network.pickle.gz'):
+        print('trying to load the network data...')
         with gzip.GzipFile(glob.glob(n_base+'/network*pickle.gz')[0],'rb') as f:
             D = pickle.load(f)
     else:
         print('preprocessing the network..')
-        command = ['python3','preprocess_network.py','--in_path',n_base,
+        command = ['python3',os.path.dirname(__file__)+'/preprocess_network.py','--in_path',n_base,
                    '--out_dir',n_base,'--walk %s'%walk,
                    '--time %s,%s'%(search_time[0],search_time[1])]
         if search_date is not None:  command += ['--date',search_date]
+        if target_cpus is not None: command += ['--cpus',str(target_cpus)]
+        print('starting network preprocessing, please stand by for params:%s'%command)
         try:
             t_start = time.time()
             out = ''
@@ -181,7 +185,7 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10.0,max_t
                 owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get to the stop in seconds
                 dwt = int(round(wods['d'][d]*w_secs+0.5)) #walking time to get to the dest in seconds
                 s_time = [search_time[0]+owt,search_time[1]+owt]
-                if o in graph:
+                if dwt<=buff_time*60.0 and owt<=buff_time*60.0 and o in graph:
                     for i in range(len(graph[o]['out'])):
                         if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                             tid = graph[o]['out'][i][2:]
@@ -229,7 +233,7 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10.0,max_t
                     owt = int(round(wods['o'][o]*w_secs+0.5)) #walking time to get the stop in seconds
                     dpt = int(round(pods['d'][d]*p_secs+0.5)) #walking time to get the stop in seconds
                     s_time = [search_time[0]+owt,search_time[1]+owt]
-                    if o in graph:
+                    if owt<buff_time*60.0 and o in graph:
                         for i in range(len(graph[o]['out'])):
                             if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                                 tid = graph[o]['out'][i][2:]
@@ -239,7 +243,7 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10.0,max_t
                     opt = int(round(pods['o'][o]*p_secs+0.5))
                     dwt = int(round(wods['d'][d]*w_secs+0.5))
                     s_time = [search_time[0]+opt,search_time[1]+opt]
-                    if o in graph:
+                    if dwt<buff_time*60.0 and o in graph:
                         for i in range(len(graph[o]['out'])):
                             if graph[o]['out'][i][1]>=s_time[0] and graph[o]['out'][i][1]<=s_time[1]:
                                 tid = graph[o]['out'][i][2:]
@@ -305,60 +309,6 @@ def ldist_cluster(l_dist,thresh=0.5):
                 if i in C: C[i] += [j]
                 else:      C[i]  = [j]
 
-#V is a valid trip buffer that will collect the valid possible trips to score and expand uppon
-#c_sid,c_time,c_tid,tdx is the current stop and current time on the currect trip with index tdx
-#d_stops d_time are the destination stops and max time, any of which are a goal => stop condidtion
-#stops has each stop ids NN <= walk buffer=0.5=>10 minutes or 600 seconds
-#seqs is the individual trig sequences that are used for building the trips
-#graph is the time-based stop graph that is used for calculating waiting and walking transfers
-#buff_time is used to calculate waiting tranfers and 10min=600 seconds
-#L is the legs at that point in the search, which works like a stack: [tid,tdx,sid,stime,penalty]
-def DFS(c_tid,c_tdx,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,
-        trans=3,buff_time=10,walk_speed=3,pw=[0,10,20],verbose=False):
-    c_stop,c_time,out_sdx,in_sdx = seqs[c_tid][c_tdx-1] #will be graph indexes for in and out links
-    D,B,scores = [],[],[] #L is for prepending links, F is for managing returning branches that are collected
-    if seqs[c_tid][c_tdx][1]>=d_time or trans<=0: #this path has failed=> exeeded time or number of transfers
-        D = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-        return D
-    else: #search using [(1)] direct [(2)] stoping [(3)] walking, followed by optimization [(4)]
-        if seqs[c_tid][c_tdx][0] in d_stops:
-            print('------- found stop=%s -------'%seqs[c_tid][c_tdx][0])
-            D =  [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-            return D
-        elif c_tdx<len(seqs[c_tid])-1: #if c_tdx==len(seqs[c_tid] then it is the last stop...
-            D  = [[c_tid,c_tdx,seqs[c_tid][c_tdx][0],seqs[c_tid][c_tdx][1],(seqs[c_tid][c_tdx][1]-c_time)+pw[0]*60]]
-            B += [D+DFS(c_tid,c_tdx+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans)]#directs => depth first
-        G,time_a,time_b = graph[c_stop]['out'],c_time,c_time+buff_time*60
-        gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
-        for i in gidx:
-            ws = G[i] #wait at the stop = ws
-            if ws[2]!=c_tid and ws[3]+1<len(seqs[ws[2]])-1 and seqs[ws[2]][ws[3]][1]<d_time: #link end time-------------
-                D  = [[-1,0,c_stop,seqs[ws[2]][ws[3]][1],(seqs[ws[2]][ws[3]][1]-c_time)+pw[1]*60]] #waiting time + pw[1]
-                B += [D+DFS(ws[2],ws[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)] #recurse waiting
-        w_secs = int(round((60*60)/walk_speed))
-        for j in range(len(stops[c_stop][2])):
-            wt_stop = stops[c_stop][2][j][0]                        #found a walking stop
-            time_a  = int(c_time+stops[c_stop][2][j][1]*w_secs+0.5) #time once you get to the stop
-            time_b  = int(min(d_time,time_a+buff_time*60))          #waiting time after you get to the stop
-            if time_a<d_time and wt_stop in graph: #past max time from the walk time period
-                G     = graph[wt_stop]['out']
-                gidx = ([] if len(G)<1 else list(np.where(np.logical_and(G[:,1]>=time_a,G[:,1]<time_b))[0]))
-                for i in gidx:
-                    wt = G[i] #don't want people getting on the same trip after walking...
-                    if wt[2]!=c_tid and wt[3]+1<len(seqs[wt[2]]) and seqs[wt[2]][wt[3]][1]<d_time:
-                        if wt[2]!=c_tid and seqs[wt[2]][wt[3]][1]<d_time: #trip end times are within the boundry--------
-                            D  = [[-2,0,wt_stop,time_a,(time_a-c_time)+pw[2]*60]] # walking leg
-                            D += [[-1,0,wt_stop,wt[1],(wt[1]-time_a)+pw[1]*60]]   # waiting leg
-                            B += [D+DFS(wt[2],wt[3]+1,d_stops,d_time,stops,seqs,graph,s_dist,l_dist,trans-1)]
-    if len(B)>0: #[(4)] optimize/filter the returned paths (some were pruned via time/transfer limits:::::::::::::::::::
-        for i in range(len(B)):
-            if len(B[i])>0 and B[i][len(B[i])-1][2] in d_stops: #need to have a trip that ends at one of the d_stops
-                scores += [[sum([B[i][j][4] for j in range(len(B[i]))]),i]]
-        if len(scores)>0: #found a valid trip
-            return B[sorted(scores)[0][1]]
-        else: return []
-    else: return []
-
 #pick the best path out a bunch that must have a d_stop in it
 def path_time_score(trip,c_time):
     if len(trip)>0:
@@ -381,7 +331,7 @@ def sub_seq_leg(seqs,tid,tdx,sid,pw):
     for a in range(tdx,len(seqs[tid]),1):
         if seqs[tid][a][0]==sid: i = a; break
     if i>=0:
-        L = [[tid,j,seqs[tid][j][0],seqs[tid][j][1],pw[0]] for j in range(tdx,i+1,1)]
+        L = [[tid,j,seqs[tid][j][0],seqs[tid][j][1],pw['offset'][0]] for j in range(tdx,i+1,1)]
     return L
 
 #randomly sample the branches encountered in T
@@ -447,72 +397,14 @@ def update_paths(K,D,S,L,s_dist,k=5):
         for k in D: S[k] = sum([D[k][x] for x in D[k]])
     return K,D,S
 
-# random tree search algorithm: RTS for K dissimiliar short paths (RKDSP)
-# tid,tdx is the trip at a stop, sid is the destination
-# T+F,seqs,pw are the tree,fwd_stops,seq and penalties
-def RTS_KD(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},t_max=3,k_dis=5,t_p=[1.0,0.5,0.25]):
-    start = time.time()
-    K,D,S = {i:[] for i in range(t_max+1)},{i:{} for i in range(t_max+1)},{i:{} for i in range(t_max+1)}
-    for c in C:
-        s0,sid = (c[2],c[3]),c[5][0]
-        if sid in F[s0[0:2]]:
-            L = sub_seq_leg(seqs,s0[0],s0[1],sid,pw)
-            L  = np.array(L,dtype=np.int32)
-            K[0],D[0],S[0] = update_paths(K[0],D[0],S[0],L,s_dist,k=k_dis)
-        elif t_max>0: #gather transfer branches from tid,tdx
-            for a1,s1 in sample_branches(T,seqs,s0,p=t_p[0]): #a1 is the last stop before transfer-1
-                if sid in F[s1[0:2]]:
-                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
-                    L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
-                    L  = np.array(L,dtype=np.int32)                                         #np array
-                    K[1],D[1],S[1] = update_paths(K[1],D[1],S[1],L,s_dist,k=k_dis)   #filter these paths
-                elif t_max>1:
-                    for a2,s2 in sample_branches(T,seqs,s1,p=t_p[1]): #a2 is the last stop before transfer-2
-                        if sid in F[s2[0:2]]:
-                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
-                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
-                            L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
-                            L  = np.array(L,dtype=np.int32)                                         #np array
-                            K[2],D[2],S[2] = update_paths(K[2],D[2],S[2],L,s_dist,k=k_dis)   #filter these paths
-                        elif t_max>2:
-                            for a3,s3 in sample_branches(T,seqs,s2,p=t_p[2]):
-                                if sid in F[s3[0:2]]:
-                                    L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
-                                    L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
-                                    L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
-                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
-                                    L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
-                                    L  = np.array(L,dtype=np.int32)                                         #np array
-                                    K[3],D[3],S[3] = update_paths(K[3],D[3],S[3],L,s_dist,k=k_dis)
-                                elif t_max>3:
-                                    for a4,s4 in sample_branches(T,seqs,s3,p=t_p[3]):
-                                        if sid in F[s4[0:2]]:
-                                            L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
-                                            L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
-                                            L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
-                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
-                                            L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
-                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
-                                            L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
-                                            L  = np.array(L,dtype=np.int32)                                         #np array
-                                            K[4],D[4],S[4] = update_paths(K[4],D[4],S[4],L,s_dist,k=k_dis)
-    stop = time.time()
-    print('searched for max_trans=%s in %s sec'%(t_max,round(stop-start,2)))
-    return K,D,S
-
 #compute penalties by seconds and mode: w*secs
-def penalty(secs,mode,coeff={0:1.0,-1:1.1,-2:1.5,-3:1.1},offset={0:0,-1:10*60,-2:20*60,-3:20*60}):
-    return coeff[mode]*secs + offset[mode]
+def penalty(secs,mode,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},
+                          'offset':{0:0,  -1:10*60,-2:20*60,-3:20*60}}):
+    return pw['coeff'][mode]*secs + pw['offset'][mode]
 
 #can add more nuanced penalties: pw{0:lambda x: x
-def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
+def RTS_FULL(C,T,F,seqs,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},
+                            'offset':{0:0,  -1:10*60,-2:20*60,-3:20*60}},
              min_paths=5,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],
              min_rate=-3.0,add_od=True,verbose=True):
     t_start = time.time()
@@ -533,7 +425,7 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
             for a1,s1 in sample_branches(T,seqs,s0,trans_p[0],max_time,s_dist,sid,min_rate):
                 if s1[0:2] in F and sid in F[s1[0:2]]:
                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                    L += [[s1[2], 0, seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],penalty(seqs[s1[0]][s1[1]][1]-L[-1][3],s1[2],pw)]]  #transfer-1
                     L += sub_seq_leg(seqs,s1[0],s1[1],sid,pw)                               #before destination
                     if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                     Y  = np.array(L,dtype=np.int32)                                         #np array
@@ -545,9 +437,9 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
                     for a2,s2 in sample_branches(T,seqs,s1,trans_p[1],max_time,s_dist,sid,min_rate+1.0):
                         if s2[0:2] in F and sid in F[s2[0:2]]:
                             L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],penalty(seqs[s1[0]][s1[1]][1]-L[-1][3],s1[2],pw)]]  #transfer-1
                             L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],penalty(seqs[s2[0]][s2[1]][1]-L[-1][3],s2[2],pw)]]  #transfer-2
                             L += sub_seq_leg(seqs,s2[0],s2[1],sid,pw)                               #before destination
                             if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                             Y  = np.array(L,dtype=np.int32)                                         #np array
@@ -559,11 +451,11 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
                             for a3,s3 in sample_branches(T,seqs,s2,trans_p[2],max_time,s_dist,sid,min_rate+1.0):
                                 if s3[0:2] in F and sid in F[s3[0:2]]:
                                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],penalty(seqs[s1[0]][s1[1]][1]-L[-1][3],s1[2],pw)]]  #transfer-1
                                     L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],penalty(seqs[s2[0]][s2[1]][1]-L[-1][3],s2[2],pw)]]  #transfer-2
                                     L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
-                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],penalty(seqs[s3[0]][s3[1]][1]-L[-1][3],s3[2],pw)]]  #transfer-3
                                     L += sub_seq_leg(seqs,s3[0],s3[1],sid,pw)                               #before destination
                                     if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                                     Y  = np.array(L,dtype=np.int32)                                         #np array
@@ -575,13 +467,13 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
                                     for a4,s4 in sample_branches(T,seqs,s3,trans_p[3],max_time,s_dist,sid,min_rate+1.0):
                                         if s4[0:2] in F and sid in F[s4[0:2]]:
                                             L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                            L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],penalty(seqs[s1[0]][s1[1]][1]-L[-1][3],s1[2],pw)]]  #transfer-1
                                             L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                            L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],penalty(seqs[s2[0]][s2[1]][1]-L[-1][3],s2[2],pw)]]  #transfer-2
                                             L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
-                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                            L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],penalty(seqs[s3[0]][s3[1]][1]-L[-1][3],s3[2],pw)]]  #transfer-3
                                             L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
-                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                            L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],penalty(seqs[s4[0]][s4[1]][1]-L[-1][3],s4[2],pw)]]  #transfer-4
                                             L += sub_seq_leg(seqs,s4[0],s4[1],sid,pw)                               #before destination
                                             if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                                             Y  = np.array(L,dtype=np.int32)                                         #np array
@@ -593,15 +485,15 @@ def RTS_FULL(C,T,F,seqs,pw={0:0,-1:10*60,-2:20*60,-3:20*60},
                                             for a5,s5 in sample_branches(T,seqs,s4,trans_p[4],max_time,s_dist,sid,min_rate+1.0):
                                                 if s5[0:2] in F and sid in F[s5[0:2]]:
                                                     L  = sub_seq_leg(seqs,s0[0],s0[1],seqs[s0[0]][a1][0],pw)                #before transfer-1
-                                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],pw[s1[2]]]]  #transfer-1
+                                                    L += [[s1[2],0,seqs[s1[0]][s1[1]][0],seqs[s1[0]][s1[1]][1],penalty(seqs[s1[0]][s1[1]][1]-L[-1][3],s1[2],pw)]]  #transfer-1
                                                     L += sub_seq_leg(seqs,s1[0],s1[1],seqs[s1[0]][a2][0],pw)                #before transfer-2
-                                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],pw[s2[2]]]]  #transfer-2
+                                                    L += [[s2[2],0,seqs[s2[0]][s2[1]][0],seqs[s2[0]][s2[1]][1],penalty(seqs[s2[0]][s2[1]][1]-L[-1][3],s2[2],pw)]]  #transfer-2
                                                     L += sub_seq_leg(seqs,s2[0],s2[1],seqs[s2[0]][a3][0],pw)                #before transfer-3
-                                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],pw[s3[2]]]]  #transfer-3
+                                                    L += [[s3[2],0,seqs[s3[0]][s3[1]][0],seqs[s3[0]][s3[1]][1],penalty(seqs[s3[0]][s3[1]][1]-L[-1][3],s3[2],pw)]]  #transfer-3
                                                     L += sub_seq_leg(seqs,s3[0],s3[1],seqs[s3[0]][a4][0],pw)                #before transfer-4
-                                                    L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],pw[s4[2]]]]  #transfer-4
+                                                    L += [[s4[2],0,seqs[s4[0]][s4[1]][0],seqs[s4[0]][s4[1]][1],penalty(seqs[s4[0]][s4[1]][1]-L[-1][3],s4[2],pw)]]  #transfer-4
                                                     L += sub_seq_leg(seqs,s4[0],s4[1],seqs[s4[0]][a5][0],pw)                #before transfer-5
-                                                    L += [[s5[2],0,seqs[s5[0]][s5[1]][0],seqs[s5[0]][s5[1]][1],pw[s5[2]]]]  #transfer-5
+                                                    L += [[s5[2],0,seqs[s5[0]][s5[1]][0],seqs[s5[0]][s5[1]][1],penalty(seqs[s5[0]][s5[1]][1]-L[-1][3],s5[2],pw)]]  #transfer-5
                                                     L += sub_seq_leg(seqs,s5[0],s5[1],sid,pw)                               #before destination
                                                     if add_od: L = [[origin[0],0,origin[1],init_time-origin[2],origin[2]]]+L+[[dest[1],0,dest[0],L[-1][3]+dest[2],dest[2]]]
                                                     Y  = np.array(L,dtype=np.int32)                                         #np array
@@ -618,6 +510,15 @@ def multi_core_lcs(P,S,s_dist):
     for p in P:
         t,i,j = p[0],p[1],p[2]
         l = tu.lcs(S[t][i][0][:,2:],S[t][j][0][:,2:],s_dist)
+        R += [[t,i,j,l]]
+    return R
+
+def multi_core_jaccard(P,S):
+    R = []
+    for p in P:
+        t,i,j = p[0],p[1],p[2]
+        A,B = set(S[t][i][0][:,2]),set(S[t][j][0][:,2])
+        l = [len(A.intersection(B)),len(A.union(B))]
         R += [[t,i,j,l]]
     return R
 
@@ -708,6 +609,18 @@ def k_dis_paths(X,s_dist,k=5,verbose=False):
                 S[t]  = S[t][1:]
     return K
         #now we have the ldist matrix for the viable trips and the cost
+
+#returns a mix coeffcient starting at 1.0 and ending at 0.0 using k steps
+def select_k_paths(S,k,type='lin'):
+    P = copy.deepcopy(S)
+    ws,KS = [],[]
+    if type=='lin':
+        for i in range(1,k+1,1): ws += [1.0-(i-1.0)/(k-1.0)]
+    for i in range(k_value): #S_term(cost)+D_term(distance)
+        P   = sorted(P,key=lambda y: ws[i]*y[2] + (1.0-ws[i])*y[3])
+        KS += [P[0]]
+        P   = P[1:]
+    return KS
 
 def get_time_string(t):
     hours   = t//(60*60)
@@ -809,17 +722,17 @@ def write_human_paths_tsv(path,H):
     return False
 
 if __name__ == '__main__':
-    des = """K dissimiliar Paths Random Tree Trip Search (KD-LCSWT-RTS), Copyright (C) 2020-2021 Timothy James Becker
-    Random importance sampling of transfers with Longest Common Subsequence With Transfer Correction Metric"""
+    des = """K dissimiliar Paths Random Tree Trip Search (KD-RTS), Copyright (C) 2020-2021 Timothy James Becker
+    Random importance sampling of paths with Longest Common Subsequence With Transfer (LCSWT) or Jaccard (J) Metric"""
     parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--net_dir',type=str,help='network directory base path\t[None]')
     parser.add_argument('--demand_path',type=str,help='demand file path\t[None]')
     parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
     #filtering and limiting of search-----------------------------------------------------------------------------------------
     parser.add_argument('--time_range',type=str,help='search time range in hours\t[0:00-32:00]')
-    parser.add_argument('--buff_time',type=float,help='maximum time in minutes to wait or walk at any leg of trip\t[20.0]')
+    parser.add_argument('--buff_time',type=float,help='maximum time in minutes to wait or walk at any leg of trip\t[10.0]')
     parser.add_argument('--max_time',type=float,help='maximum time in minutes for the total trip\t[90.0]')
-    parser.add_argument('--max_trans',type=int,help='maximum number of transfers to search for (can go up to 5)\t[4]')
+    parser.add_argument('--max_trans',type=int,help='maximum number of transfers to search for (can go up to 5)\t[3]')
     parser.add_argument('--trans_prop',type=str,help='sample proportion for transfer paths\t[1.0,0.5,0.25,0.125]')
     parser.add_argument('--heading_limit',type=int,help='cutoff value in mph for initial od access/egress candidates\t[-3.0]')
     # initial conditions for search-------------------------------------------------------------------------------------------
@@ -828,6 +741,7 @@ if __name__ == '__main__':
     parser.add_argument('--drive_speed',type=float,help='average driving speed in mph to get to park and ride or home\t[30.0]')
     parser.add_argument('--k_lim',type=int,help='the maximum number of discrete paths per transfer before sampling occurs in the k-path calculation\t[500]')
     parser.add_argument('--k_value',type=int,help='the maximum number of paths to calculate per transfer\t[5]')
+    parser.add_argument('--simple_stop',action='store_true',help='use the simple jaccard stop set metric instead of LCSWT\t[False]')
     parser.add_argument('--abbreviate',action='store_true',help='abbreviate the final paths so only include tranfer points\t[False]')
     parser.add_argument('--cpus',type=int,help='number of cpus to use\t[1]')
     # parser.add_argument('--test',action='store_true',help='')
@@ -850,7 +764,7 @@ if __name__ == '__main__':
     if args.buff_time is not None:
         buff_time = args.buff_time
     else:
-        buff_time = 20.0
+        buff_time = 10.0
     if args.max_time is not None:
         max_time = args.buff_time
     else:
@@ -870,11 +784,11 @@ if __name__ == '__main__':
     if args.max_trans is not None:
         max_trans = args.max_trans
     else:
-        max_trans = 4
+        max_trans = 3
     if args.trans_prop is not None:
         trans_prop = [float(x) for x in args.tras_prop.rsplit(',')]
     else:
-        trans_prop = [1.0,0.5,0.25,0.125,0.0625] #divid by 2 per transfer leve in the search tree
+        trans_prop = [1.0,0.5,0.25,0.125,0.0625] #divid by 2 per transfer leave in the search tree
     if args.heading_limit is not None:
         heading_limit = args.heading_limit
     else:
@@ -891,8 +805,11 @@ if __name__ == '__main__':
         cpus = args.cpus
     else:
         cpus = 1
+    if args.simple_stop: jaccard = True
+    else:                jaccard = False
 
-    D = load_network_data(n_base,search_time=search_time) #will run preproccess_network if it was not already
+    D = load_network_data(n_base,walk=((walk_speed/60.0)*buff_time),search_time=search_time,target_cpus=cpus) #can run preproccess_network.py
+
     persons = read_person_trip_list(d_path)
     stops,s_idx,s_names,s_dist,w_dist,p_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist'],D['p_dist']
     trips,trip_idx,v_dist,calendar    = D['trips'],D['trip_idx'],D['v_dist'],D['calendar']
@@ -932,9 +849,7 @@ if __name__ == '__main__':
         P = sorted(P,key=lambda x: len(x[3]))[::-1] #sort by the number of candidates to search
         for i in range(len(P)):
             partitions[i%cpus] += [P[i]]
-
         if not os.path.exists(out_dir): os.mkdir(out_dir)
-        result_path = out_dir+'rts.result.pickle.gz'
         print('starting || cython random tree search (RTS) computation')
         t_start = time.time()
         p1 = mp.Pool(processes=cpus)
@@ -947,9 +862,9 @@ if __name__ == '__main__':
         t_stop = time.time()
         print('completed in %s minutes'%round((t_stop-t_start)/60,2))
         result_list = []
-
-    if len(glob.glob(out_dir + '/k%s*person*trip*.pickle.gz'%k_value))<=0:
-        #[3] now we run for each person/trip the LCSWT in || to maximize cpu utilization
+    metric = ('jaccard' if jaccard else 'lcswt')
+    #[3] now we run for each person/trip the LCSWT in || to maximize cpu utilization
+    if len(glob.glob(out_dir + '/%s_k%s*person*trip*.pickle.gz'%(metric,k_value)))<=0:
         P,verbose = [],False
         for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz')):
             base_dir = '/'.join(path.rsplit('/')[:-1])+'/'
@@ -963,8 +878,7 @@ if __name__ == '__main__':
                 service_id = D['service_id']
                 X          = D['paths']
             print('loaded prexisting RST search data for person=%s, trip=%s and service_id=%s'%(person,trip,service_id))
-            # k_dis_paths(X,s_dist,k=5,verbose=False):
-            S,K = {},{}
+            S = {}
             for t in X:
                 S[t] = []
                 for v in X[t]:
@@ -992,26 +906,39 @@ if __name__ == '__main__':
                     for j in range(x,len(S[t]),1):
                         L += [[t,i,j,len(S[t][i][0][:,2:-1])*len(S[t][j][0][:,2:-1])]]
                     x += 1
-            L = sorted(L,key=lambda x: x[3])[::-1] # sort by higest edit distance computation cost
+            L = sorted(L,key=lambda x: x[3])[::-1] # sort by highest edit distance computation cost
 
             cpus = min(cpus,mp.cpu_count())
             partitions = [[] for x in range(cpus)]
             for i in range(len(L)): partitions[i%cpus] += [L[i]]
-            print('computing %s LCSWT pairs using %s cpu partitions for %s'%(len(L),cpus,path))
 
             result_list = []
-            t_start = time.time()
-            p2 = mp.Pool(processes=cpus)
-            for i in range(len(partitions)):
-                p2.apply_async(multi_core_lcs,
-                               args=(partitions[i],S,s_dist),
-                               callback=collect_results)
-            p2.close()
-            p2.join()
-            t_stop = time.time()
-            print('|| LCSWT for %s completed in %s minutes'%(path,round((t_stop-t_start)/60,2)))
-            print('performance: %s LCSWT pairs/sec'%(int(len(L)/(t_stop-t_start))))
-
+            if jaccard:
+                print('computing %s jaccard pairs using %s cpu partitions for %s'%(len(L),cpus,path))
+                t_start = time.time()
+                p2 = mp.Pool(processes=cpus)
+                for i in range(len(partitions)):
+                    p2.apply_async(multi_core_jaccard,
+                                   args=(partitions[i],S),
+                                   callback=collect_results)
+                p2.close()
+                p2.join()
+                t_stop = time.time()
+                print('|| jaccard for %s completed in %s minutes'%(path,round((t_stop-t_start)/60,2)))
+                print('performance: %s jaccard pairs/sec'%(int(len(L)/(t_stop-t_start))))
+            else:
+                print('computing %s LCSWT pairs using %s cpu partitions for %s'%(len(L),cpus,path))
+                t_start = time.time()
+                p2 = mp.Pool(processes=cpus)
+                for i in range(len(partitions)):
+                    p2.apply_async(multi_core_lcs,
+                                   args=(partitions[i],S,s_dist),
+                                   callback=collect_results)
+                p2.close()
+                p2.join()
+                t_stop = time.time()
+                print('|| LCSWT for %s completed in %s minutes'%(path,round((t_stop-t_start)/60,2)))
+                print('performance: %s LCSWT pairs/sec'%(int(len(L)/(t_stop-t_start))))
             #unpack the per cpu result list---------------------------------------
             L = {}
             for result in result_list:
@@ -1022,52 +949,60 @@ if __name__ == '__main__':
                         else:         L[t][i] = {j:l}
                     else:             L[t] = {i:{j:l}}
             #----------------------------------------------------------------------
-
+            K = {}
             for t in S:
                 SP,K[t],D = [],[],np.zeros((len(S[t]),len(S[t])),dtype=np.float32) #LCSWT harmonic mean distance from 0.0 to 1.0
                 if len(S[t])>k_value: #k=1 is just lowest cost path
-                    #-------------------------------------------------------------------------------------
-                    x = 1
-                    for i in range(len(S[t])):         #calculate upper triangle
-                        for j in range(x,len(S[t]),1): #and copy to lower triangle
-                            l = L[t][i][j]
-                            D[i][j] = D[j][i] = 1.0-2.0*((l[0]/l[1])*(l[0]/l[2]))/((l[0]/l[1])+(l[0]/l[2]))
-                        x += 1
-                    #--------------------------------------------------------------------------------------
-                    for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])
-                    for i in range(1,k_value+1,1): #S_term(cost)+D_term(distance)
-                        S[t]  = sorted(S[t],key=lambda y: y[2]*(1.0-(i-1.0)/(k_value-1.0))+(1.0-y[3])*(i-1.0)/(k_value-1.0))
-                        K[t] += [S[t][0]]
-                        S[t]  = S[t][1:]
+                    if jaccard:
+                        #-------------------------------------------------------------------------------------
+                        x = 1
+                        for i in range(len(S[t])):         #calculate upper triangle
+                            for j in range(x,len(S[t]),1): #and copy to lower triangle
+                                D[i][j] = D[j][i] = 1.0-L[t][i][j][0]/L[t][i][j][1]
+                            x += 1
+                        #--------------------------------------------------------------------------------------
+                    else:
+                        #-------------------------------------------------------------------------------------
+                        x = 1
+                        for i in range(len(S[t])):         #calculate upper triangle
+                            for j in range(x,len(S[t]),1): #and copy to lower triangle
+                                D[i][j] = D[j][i] = 1.0-2.0*L[t][i][j][0]/(L[t][i][j][1]+L[t][i][j][2])
+                            x += 1
+                        #--------------------------------------------------------------------------------------
+                    for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])/len(S[t])
+                    K[t] = select_k_paths(S[t],k_value,type='lin')
             #save the K paths pickles for each to reduce memory
-            with gzip.GzipFile(out_dir+'/k%s_person%s_trip%s.pickle.gz'%(k_value,person,trip),'wb') as fk:
+            with gzip.GzipFile(out_dir+'/%s_k%s_person%s_trip%s.pickle.gz'%(metric,k_value,person,trip),'wb') as fk:
                 pickle.dump(K,fk)
 
-    if len(glob.glob(out_dir+'/k%s_human_results.tsv'%k_value))<=0:
-        X = {}
-        for k_path in sorted(glob.glob(out_dir+'/k%s*person*trip*.pickle.gz'%k_value)):
-            with gzip.GzipFile(k_path,'rb') as fk:
-                k_check = False
-                try:
-                    k_check = k_value==int(k_path.rsplit('/')[-1].rsplit('k')[1].rsplit('_')[0])
-                except: pass
-                person = -1 #not in a set of enumerations since they start at 0
-                try:
-                    person = int(k_path.rsplit('/')[-1].rsplit('_')[1].rsplit('person')[1])
-                except: pass
-                trip = -1 #not in a set of enumerations since they start at 0
-                try:
-                    trip = int(k_path.rsplit('/')[-1].rsplit('.')[0].rsplit('trip')[1])
-                except: pass
-                if person in persons and trip in range(len(persons[person])):
-                    print('located data for person=%s, trip=%s'%(person,trip))
-                    if person not in X: X[person] = {}
-                    if trip not in X[person]: X[person][trip] = {}
-                    X[person][trip] = pickle.load(fk)
-        H = get_human_paths(X,persons,s_names,abbreviate=not args.abbreviate)
-        if args.abbreviate:
-            print('converted all k-paths, writing file to disk:%s'%(out_dir+'/k%s_human_results_abbr.tsv'%k_value))
-            write_human_paths_tsv(out_dir+'/k%s_human_results_abbr.tsv'%k_value,H)
-        else:
-            print('converted all k-paths, writing file to disk:%s'%(out_dir+'/k%s_human_results.tsv'%k_value))
-            write_human_paths_tsv(out_dir+'/k%s_human_results.tsv'%k_value,H)
+    X = {}
+    for k_path in sorted(glob.glob(out_dir+'/%s_k%s*person*trip*.pickle.gz'%(metric,k_value))):
+        with gzip.GzipFile(k_path,'rb') as fk:
+            metric_check = False
+            try:
+                metric_check = metric==k_path.rsplit('/')[-1].rsplit('_')[0]
+            except: pass
+            k_check = False
+            try:
+                k_check = k_value==int(k_path.rsplit('/')[-1].rsplit('k')[1].rsplit('_')[0])
+            except: pass
+            person = -1 #not in a set of enumerations since they start at 0
+            try:
+                person = int(k_path.rsplit('/')[-1].rsplit('_')[2].rsplit('person')[1])
+            except: pass
+            trip = -1 #not in a set of enumerations since they start at 0
+            try:
+                trip = int(k_path.rsplit('/')[-1].rsplit('.')[0].rsplit('trip')[1])
+            except: pass
+            if metric_check and person in persons and trip in range(len(persons[person])):
+                print('located final k-dis data for metric=%s, person=%s, trip=%s'%(metric,person,trip))
+                if person not in X: X[person] = {}
+                if trip not in X[person]: X[person][trip] = {}
+                X[person][trip] = pickle.load(fk)
+    H = get_human_paths(X,persons,s_names,abbreviate=args.abbreviate)
+    if args.abbreviate:
+        print('converted all k-paths, writing file to disk:%s'%(out_dir+'/%s_k%s_human_results_abbr.tsv'%(metric,k_value)))
+        write_human_paths_tsv(out_dir+'/%s_k%s_human_results_abbr.tsv'%(metric,k_value),H)
+    else:
+        print('converted all k-paths, writing file to disk:%s'%(out_dir+'/%s_k%s_human_results.tsv'%(metric,k_value)))
+        write_human_paths_tsv(out_dir+'/%s_k%s_human_results.tsv'%(metric,k_value),H)

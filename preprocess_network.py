@@ -202,7 +202,7 @@ def time_overlap(xys,ss,ls):
 #---------------------------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    des = """Preprocess Network Tool, Copyright (C) 2020 Timothy James Becker"""
+    des = """Preprocess Network Tool, Copyright (C) 2020-2021 Timothy James Becker"""
     parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
     parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
@@ -268,9 +268,8 @@ if __name__ == '__main__':
         s_dist = s_array
         l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*3,lock=False))
         l_dist    = l_dist.reshape(len(ls),len(ls),3)
-        #globally bound mp.ctypes arrays--------------------------------------------------------------------------
 
-        cpus = mp.cpu_count()
+        #globally bound mp.ctypes arrays--------------------------------------------------------------------------
         xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
         partitions,n = [],len(xys)//cpus
         for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
@@ -351,7 +350,6 @@ if __name__ == '__main__':
             l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*3,lock=False))
             l_dist    = l_dist.reshape(len(ls),len(ls),3)
             #globally bound mp.ctypes arrays--------------------------------------------------------------------------
-            cpus = mp.cpu_count()
             xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
             if len(xys)>cpus:
                 partitions,n = [],len(xys)//cpus
