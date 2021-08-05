@@ -9,9 +9,13 @@ import glob
 import gzip
 import pickle
 import subprocess
-import numpy as np
+from sklearn.manifold import MDS
 import itertools as it
 import multiprocessing as mp
+import numpy as np
+# import matplotlib
+# matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 import transit_utils as tu
 import read_utils as ru
 
@@ -610,16 +614,92 @@ def k_dis_paths(X,s_dist,k=5,verbose=False):
     return K
         #now we have the ldist matrix for the viable trips and the cost
 
+#for each person trip run through all select_k_paths types
+def cost_diss_full_analysis(S,k):
+    return True
+
 #returns a mix coeffcient starting at 1.0 and ending at 0.0 using k steps
-def select_k_paths(S,k,type='lin'):
+def select_k_paths(S,k,type='xy'):
     P = copy.deepcopy(S)
-    ws,KS = [],[]
-    if type=='lin':
+    ks,KS = set([]),[]
+    if type=='xy':
+        ws = []
         for i in range(1,k+1,1): ws += [1.0-(i-1.0)/(k-1.0)]
+    if type=='y_2':
+        ws = []
+        for i in range(k): ws += [i**2.0]
+        ws = ws[::-1]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+    if type=='x_2':
+        ws = []
+        for i in range(k): ws += [i**2.0]
+        ws = ws[::-1]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+        ws = [1.0-x for x in ws[::-1]]
+    if type=='y_3':
+        ws = []
+        for i in range(k): ws += [i**3.0]
+        ws = ws[::-1]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+    if type=='x_3':
+        ws = []
+        for i in range(k): ws += [i**3.0]
+        ws = ws[::-1]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+        ws = [1.0-x for x in ws[::-1]]
+    if type=='x_log_2':
+        ws = [1.0]
+        if k>1:
+            for i in range(k-1):
+                ws += [ws[-1]/2]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+        ws = [1.0-x for x in ws[::-1]]
+    if type=='y_log_2':
+        ws = [1.0]
+        if k>1:
+            for i in range(k-1):
+                ws += [ws[-1]/2]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+    if type=='x_log_10':
+        ws = [1.0]
+        if k>1:
+            for i in range(k-1):
+                ws += [ws[-1]/10]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+        ws = [1.0-x for x in ws[::-1]]
+    if type=='y_log_10':
+        ws = [1.0]
+        if k>1:
+            for i in range(k-1):
+                ws += [ws[-1]/10]
+        a,b = np.min(ws),np.max(ws)
+        ws -= a
+        ws /= b-a
+    if type=='log':
+        ws = []
+        for i in range(k):
+            ws += [np.log(k-i)/np.log(k)]
     for i in range(k_value): #S_term(cost)+D_term(distance)
-        P   = sorted(P,key=lambda y: ws[i]*y[2] + (1.0-ws[i])*y[3])
-        KS += [P[0]]
-        P   = P[1:]
+        pw    = [ws[i]*y[2] + (1.0-ws[i])*y[3] for y in P] #apply the k=weighting to mix cost-diss
+        s_idx = list(np.argsort(pw))                       #order the results acsending
+        x = 0
+        while s_idx[x] in ks: x += 1
+        ks.add(s_idx[x])
+        KS += [P[s_idx[x]]+[s_idx[x]]] #add the element from S[t], but keep track of its orginal place...
     return KS
 
 def get_time_string(t):
@@ -722,7 +802,7 @@ def write_human_paths_tsv(path,H):
     return False
 
 if __name__ == '__main__':
-    des = """K dissimiliar Paths Random Tree Trip Search (KD-RTS), Copyright (C) 2020-2021 Timothy James Becker
+    des = """K-cost-dissimiliar Paths Random Tree Trip Search (KCD-RTS), Copyright (C) 2020-2021 Timothy James Becker
     Random importance sampling of paths with Longest Common Subsequence With Transfer (LCSWT) or Jaccard (J) Metric"""
     parser = argparse.ArgumentParser(description=des,formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--net_dir',type=str,help='network directory base path\t[None]')
@@ -730,7 +810,8 @@ if __name__ == '__main__':
     parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
     #filtering and limiting of search-----------------------------------------------------------------------------------------
     parser.add_argument('--time_range',type=str,help='search time range in hours\t[0:00-32:00]')
-    parser.add_argument('--buff_time',type=float,help='maximum time in minutes to wait or walk at any leg of trip\t[10.0]')
+    parser.add_argument('--buff_time',type=float,help='maximum time in minutes to wait or walk at any inner leg of trip\t[10.0]')
+    parser.add_argument('--od_walk_time',type=float,help='maximum time in minutes to walk at the origin or destination\t[10.0]')
     parser.add_argument('--max_time',type=float,help='maximum time in minutes for the total trip\t[90.0]')
     parser.add_argument('--max_trans',type=int,help='maximum number of transfers to search for (can go up to 5)\t[3]')
     parser.add_argument('--trans_prop',type=str,help='sample proportion for transfer paths\t[1.0,0.5,0.25,0.125]')
@@ -741,10 +822,9 @@ if __name__ == '__main__':
     parser.add_argument('--drive_speed',type=float,help='average driving speed in mph to get to park and ride or home\t[30.0]')
     parser.add_argument('--k_lim',type=int,help='the maximum number of discrete paths per transfer before sampling occurs in the k-path calculation\t[500]')
     parser.add_argument('--k_value',type=int,help='the maximum number of paths to calculate per transfer\t[5]')
-    parser.add_argument('--simple_stop',action='store_true',help='use the simple jaccard stop set metric instead of LCSWT\t[False]')
+    parser.add_argument('--jaccard',action='store_true',help='use the simple jaccard stop set metric instead of LCSWT\t[False]')
     parser.add_argument('--abbreviate',action='store_true',help='abbreviate the final paths so only include tranfer points\t[False]')
     parser.add_argument('--cpus',type=int,help='number of cpus to use\t[1]')
-    # parser.add_argument('--test',action='store_true',help='')
     args = parser.parse_args()
 
     if args.net_dir is not None:
@@ -765,6 +845,10 @@ if __name__ == '__main__':
         buff_time = args.buff_time
     else:
         buff_time = 10.0
+    if args.od_walk_time is not None:
+        od_walk_time = args.od_walk_time
+    else:
+        od_walk_time = 10.0
     if args.max_time is not None:
         max_time = args.buff_time
     else:
@@ -805,8 +889,8 @@ if __name__ == '__main__':
         cpus = args.cpus
     else:
         cpus = 1
-    if args.simple_stop: jaccard = True
-    else:                jaccard = False
+    if args.jaccard: jaccard = True
+    else:            jaccard = False
 
     D = load_network_data(n_base,walk=((walk_speed/60.0)*buff_time),search_time=search_time,target_cpus=cpus) #can run preproccess_network.py
 
@@ -866,7 +950,7 @@ if __name__ == '__main__':
     #[3] now we run for each person/trip the LCSWT in || to maximize cpu utilization
     if len(glob.glob(out_dir + '/%s_k%s*person*trip*.pickle.gz'%(metric,k_value)))<=0:
         P,verbose = [],False
-        for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz')):
+        for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz'))[0:1]:
             base_dir = '/'.join(path.rsplit('/')[:-1])+'/'
             person   = int(path.rsplit('/')[-1].rsplit('.')[0].rsplit('person_')[-1])
             trip     = int(path.rsplit('/')[-1].rsplit('.')[1].rsplit('trip_')[-1])
@@ -970,10 +1054,37 @@ if __name__ == '__main__':
                             x += 1
                         #--------------------------------------------------------------------------------------
                     for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])/len(S[t])
-                    K[t] = select_k_paths(S[t],k_value,type='lin')
-            #save the K paths pickles for each to reduce memory
+                    K[t] = select_k_paths(S[t],k_value,type='exp')
+
+                    embedding = MDS(n_components=2,n_jobs=cpus,dissimilarity='precomputed')
+                    d_trans   = embedding.fit_transform(D)
+                    plt.tick_params(left=False,bottom=False,labelleft=False,labelbottom=False)
+                    plt.scatter(d_trans[:,0],d_trans[:,1],color=(0.0,0.0,0.0,0.1),label='all')
+                    for k in range(k_value):
+                        plt.scatter(d_trans[K[t][k][-1],0],d_trans[K[t][k][-1],1],
+                                    s=100,marker='D',color=(1.0-0.5*k/k_value,k/k_value,0.0),
+                                    zorder=3.0+2*(1.0-k/k_value),alpha=0.8,label='k_%s'%k)
+                    plt.title('person=%s,trip=%s,trans=%s'%(person,trip,t))
+                    plt.legend()
+                    plt.show()
+
+                    d_plot = np.array([x[2:4] for x in S[t]])
+                    plt.scatter(d_plot[:,0],d_plot[:,1],color=(0.0,0.0,0.0,0.1),label='all')
+                    for k in range(k_value):
+                        plt.scatter(d_plot[K[t][k][-1],0],d_plot[K[t][k][-1],1],
+                                    s=100,marker='D',color=(1.0-0.5*k/k_value,k/k_value,0.0),
+                                    zorder=3.0+2*(1.0-k/k_value),alpha=0.8,label='k_%s'%k)
+                    plt.title('person=%s,trip=%s,trans=%s'%(person,trip,t))
+                    plt.xlabel('low to high cost')
+                    plt.ylabel('low to high simularity')
+                    plt.legend()
+                    plt.show()
+
             with gzip.GzipFile(out_dir+'/%s_k%s_person%s_trip%s.pickle.gz'%(metric,k_value,person,trip),'wb') as fk:
-                pickle.dump(K,fk)
+                pickle.dump({'K':K,'D':D},fk)
+
+            print('debug...')
+            raise IOError
 
     X = {}
     for k_path in sorted(glob.glob(out_dir+'/%s_k%s*person*trip*.pickle.gz'%(metric,k_value))):
