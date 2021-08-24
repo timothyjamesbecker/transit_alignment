@@ -407,8 +407,8 @@ def penalty(secs,mode,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},
     return pw['coeff'][mode]*secs + pw['offset'][mode]
 
 #can add more nuanced penalties: pw{0:lambda x: x
-def RTS_FULL(C,T,F,seqs,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},
-                            'offset':{0:0,  -1:10*60,-2:20*60,-3:20*60}},
+def RTS_FULL(C,T,F,seqs,pw={'coeff': {0:1.0,-1:2.9,  -2:2.4,  -3:2},
+                            'offset':{0:0,  -1:20*60,-2:20*60,-3:0}},
              min_paths=5,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],
              min_rate=-3.0,add_od=True,verbose=True):
     t_start = time.time()
