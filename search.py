@@ -1083,10 +1083,6 @@ if __name__ == '__main__':
 
             with gzip.GzipFile(out_dir+'/%s_k%s_person%s_trip%s.pickle.gz'%(metric,k_value,person,trip),'wb') as fk:
                 pickle.dump({'K':K,'D':D},fk)
-
-            print('debug...')
-            raise IOError
-
     X = {}
     for k_path in sorted(glob.glob(out_dir+'/%s_k%s*person*trip*.pickle.gz'%(metric,k_value))):
         with gzip.GzipFile(k_path,'rb') as fk:
