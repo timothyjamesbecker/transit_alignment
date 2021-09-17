@@ -318,14 +318,14 @@ def path_time_score(trip,c_time):
     if len(trip)>0:
         return sum([trip[i][4] for i in range(len(trip))])
 
-def reduce_trans(trans,pw={-1:10*60,-2:20*60,-3:10*60}):
+def reduce_trans(trans,pw={'coeff': {-1:1.0,-2:1.5,-3:1.1},'offset':{-1:10*60,-2:20*60,-3:20*60}}):
     T = {}
     for t in trans:
         T[t] = {}
         for k in trans[t]:
             if k[0] not in T[t]:
                 T[t][k[0]] = k[1:4]
-            elif pw[T[t][k[0]][1]]+T[t][k[0]][2]>pw[k[2]]+k[3]:
+            elif pw['offset'][T[t][k[0]][1]]+T[t][k[0]][2]>pw['offset'][k[2]]+k[3]:
                 T[t][k[0]] = k[1:4]
     T = {t:set([(k,)+tuple(T[t][k]) for k in T[t]]) for t in T}
     return T
@@ -402,16 +402,13 @@ def update_paths(K,D,S,L,s_dist,k=5):
     return K,D,S
 
 #compute penalties by seconds and mode: w*secs
-def penalty(secs,mode,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},
-                          'offset':{0:0,  -1:10*60,-2:20*60,-3:20*60}}):
+def penalty(secs,mode,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},'offset':{0:0,  -1:10*60,-2:20*60,-3:20*60}}):
     return pw['coeff'][mode]*secs + pw['offset'][mode]
 
 #can add more nuanced penalties: pw{0:lambda x: x
-def RTS_FULL(C,T,F,seqs,pw={'coeff': {0:1.0,-1:2.9,  -2:2.4,  -3:2},
-                            'offset':{0:0,  -1:20*60,-2:20*60,-3:0}},
+def RTS_FULL(C,T,F,seqs,pw={'coeff': {0:1.0,-1:1.1,  -2:1.5,  -3:1.1},'offset':{0:0,  -1:10*60,-2:20*60,-3:2*60}},
              min_paths=5,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],
              min_rate=-3.0,add_od=True,verbose=True):
-    print('applying pw=%s'%pw)
     t_start = time.time()
     X,z = {i:{} for i in range(max_trans+1)},0
     for i in range(len(C)):
@@ -565,21 +562,25 @@ result_list = []
 def collect_results(result):
     result_list.append(result)
 
-def get_seq_paths(out_path,C,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],min_rate=-3.0):
+#out_dir,partitions[i],penalties,max_trans,trans_prop,heading_limit
+def get_seq_paths(out_path,C,D,penalties,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],min_rate=-3.0):
     X = {'error':[]}
     for i in range(len(C)):
         try:
             si = C[i][2]
             seqs,trans = D[si]['seqs'],D[si]['trans'] #doesn't work for multiple service ids...
-            T,F = reduce_trans(trans),{} #applies the penalties to select the faster option tid_a=>tid_b
+            T,F = reduce_trans(trans,penalties),{} #applies the penalties to select the faster option tid_a=>tid_b
             for (tid,tdx) in T:
                 for l in T[(tid,tdx)]:
                     if (l[0],l[1]) not in F: #tid,tdx
                         F[(l[0],l[1])] = set(seqs[l[0]][l[1]:,0])
-            R = RTS_FULL(C[i][3],T,F,seqs,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
+            R = RTS_FULL(C[i][3],T,F,seqs,pw=penalties,max_trans=max_trans,trans_p=trans_p,min_rate=min_rate)
             Y = {'person':C[i][0],'trip':C[i][1],'service_id':C[i][2],'paths':R}
             with gzip.GzipFile(out_path+'person_%s.trip_%s.pickle.gz'%(C[i][0],C[i][1]), 'wb') as f: pickle.dump(Y,f)
-        except Exception as E: X['error'] += [str(E)]
+        except Exception as E:
+            print('error encountered with C[i]=%s'%C[i])
+            print(str(E))
+            X['error'] += [str(E)]
     return X
 
 def k_dis_paths(X,s_dist,k=5,verbose=False):
@@ -620,20 +621,20 @@ def cost_diss_full_analysis(S,k):
     return True
 
 #returns a mix coeffcient starting at 1.0 and ending at 0.0 using k steps
-def select_k_paths(S,k,type='xy'):
+def select_k_paths(S,k,ktype='xy'):
     P = copy.deepcopy(S)
     ks,KS = set([]),[]
-    if type=='xy':
+    if ktype=='xy':
         ws = []
         for i in range(1,k+1,1): ws += [1.0-(i-1.0)/(k-1.0)]
-    if type=='y_2':
+    if ktype=='y_2':
         ws = []
         for i in range(k): ws += [i**2.0]
         ws = ws[::-1]
         a,b = np.min(ws),np.max(ws)
         ws -= a
         ws /= b-a
-    if type=='x_2':
+    if ktype=='x_2':
         ws = []
         for i in range(k): ws += [i**2.0]
         ws = ws[::-1]
@@ -641,14 +642,14 @@ def select_k_paths(S,k,type='xy'):
         ws -= a
         ws /= b-a
         ws = [1.0-x for x in ws[::-1]]
-    if type=='y_3':
+    if ktype=='y_3':
         ws = []
         for i in range(k): ws += [i**3.0]
         ws = ws[::-1]
         a,b = np.min(ws),np.max(ws)
         ws -= a
         ws /= b-a
-    if type=='x_3':
+    if ktype=='x_3':
         ws = []
         for i in range(k): ws += [i**3.0]
         ws = ws[::-1]
@@ -656,7 +657,7 @@ def select_k_paths(S,k,type='xy'):
         ws -= a
         ws /= b-a
         ws = [1.0-x for x in ws[::-1]]
-    if type=='x_log_2':
+    if ktype=='x_log_2':
         ws = [1.0]
         if k>1:
             for i in range(k-1):
@@ -665,7 +666,7 @@ def select_k_paths(S,k,type='xy'):
         ws -= a
         ws /= b-a
         ws = [1.0-x for x in ws[::-1]]
-    if type=='y_log_2':
+    if ktype=='y_log_2':
         ws = [1.0]
         if k>1:
             for i in range(k-1):
@@ -673,7 +674,7 @@ def select_k_paths(S,k,type='xy'):
         a,b = np.min(ws),np.max(ws)
         ws -= a
         ws /= b-a
-    if type=='x_log_10':
+    if ktype=='x_log_10':
         ws = [1.0]
         if k>1:
             for i in range(k-1):
@@ -682,7 +683,7 @@ def select_k_paths(S,k,type='xy'):
         ws -= a
         ws /= b-a
         ws = [1.0-x for x in ws[::-1]]
-    if type=='y_log_10':
+    if ktype=='y_log_10':
         ws = [1.0]
         if k>1:
             for i in range(k-1):
@@ -690,7 +691,7 @@ def select_k_paths(S,k,type='xy'):
         a,b = np.min(ws),np.max(ws)
         ws -= a
         ws /= b-a
-    if type=='log':
+    if ktype=='log':
         ws = []
         for i in range(k):
             ws += [np.log(k-i)/np.log(k)]
@@ -770,7 +771,7 @@ def get_human_paths(X,persons,s_names,abbreviate=False): #k=0 => best path
         H[i] = {}
         for j in X[i]: #all paths are index 0, k path are index 1
             H[i][j] = []
-            person_k_paths,k_paths = X[i][j],[]
+            person_k_paths,k_paths = X[i][j]['K'],[]
             for t in sorted(person_k_paths): #transfer number
                 if len(person_k_paths[t])>0: #0 is the path, 1 is the cost, 2 is the normalized cost => 0.0 is the lowest, 3 is the sum of pairs
                     k_paths = person_k_paths[t]
@@ -821,8 +822,10 @@ if __name__ == '__main__':
     parser.add_argument('--walk_speed',type=float,help='average walking speed in mph\t[3.0]')
     parser.add_argument('--bus_speed',type=float,help='average bus speed in mph for calculate heading vector estimate\t[15.0]')
     parser.add_argument('--drive_speed',type=float,help='average driving speed in mph to get to park and ride or home\t[30.0]')
+    parser.add_argument('--penalty', type=str, help='semi-colon and comma seperated coefficient,offset pairs per mode\t[x]')
     parser.add_argument('--k_lim',type=int,help='the maximum number of discrete paths per transfer before sampling occurs in the k-path calculation\t[500]')
     parser.add_argument('--k_value',type=int,help='the maximum number of paths to calculate per transfer\t[5]')
+    parser.add_argument('--k_type', type=str, help='k value mixing wieght function:xy,log,...\t[xy]')
     parser.add_argument('--jaccard',action='store_true',help='use the simple jaccard stop set metric instead of LCSWT\t[False]')
     parser.add_argument('--abbreviate',action='store_true',help='abbreviate the final paths so only include tranfer points\t[False]')
     parser.add_argument('--cpus',type=int,help='number of cpus to use\t[1]')
@@ -886,12 +889,27 @@ if __name__ == '__main__':
         k_value = args.k_value
     else:
         k_value = 5
+    if args.k_type is not None:
+        k_type = args.k_type
+    else:
+        k_type = 'xy'
     if args.cpus is not None:
         cpus = args.cpus
     else:
         cpus = 1
     if args.jaccard: jaccard = True
     else:            jaccard = False
+    if args.penalty is not None:
+        pen = {int(mode.rsplit(':')[0]):[float(x) for x in mode.rsplit(':')[-1].rsplit(',')] for mode in args.penalty.rsplit(';')}
+        if 0 not in pen or -1 not in pen or -2 not in pen or -3 not in pen:
+            print('penalty values are not complete, using default values instead!')
+            pen = {0: [1.0, 0.0], -1: [1.1, 10 * 60.0], -2: [1.5, 20 * 60.0], -3: [2.0, 30 * 60.0]}
+    else: pen = {0:[1.0,0.0],-1:[1.1,10*60.0],-2:[1.5,20*60.0],-3:[2.0,30*60.0]}
+    penalties = {'coeff':{},'offset':{}}
+    for t in pen:
+        penalties['coeff'][t]  = pen[t][0]
+        penalties['offset'][t] = pen[t][1]
+    print('using penalty weighting values=%s'%penalties)
 
     D = load_network_data(n_base,walk=((walk_speed/60.0)*buff_time),search_time=search_time,target_cpus=cpus) #can run preproccess_network.py
 
@@ -940,7 +958,7 @@ if __name__ == '__main__':
         p1 = mp.Pool(processes=cpus)
         for i in range(len(partitions)):
             p1.apply_async(get_seq_paths,
-                           args=(out_dir,partitions[i],max_trans,trans_prop,heading_limit),
+                           args=(out_dir,partitions[i],D,penalties,max_trans,trans_prop,heading_limit),
                            callback=collect_results)
         p1.close()
         p1.join()
@@ -951,7 +969,7 @@ if __name__ == '__main__':
     #[3] now we run for each person/trip the LCSWT in || to maximize cpu utilization
     if len(glob.glob(out_dir + '/%s_k%s*person*trip*.pickle.gz'%(metric,k_value)))<=0:
         P,verbose = [],False
-        for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz'))[0:1]:
+        for path in sorted(glob.glob(out_dir+'/person*trip*.pickle.gz')):
             base_dir = '/'.join(path.rsplit('/')[:-1])+'/'
             person   = int(path.rsplit('/')[-1].rsplit('.')[0].rsplit('person_')[-1])
             trip     = int(path.rsplit('/')[-1].rsplit('.')[1].rsplit('trip_')[-1])
@@ -1055,8 +1073,12 @@ if __name__ == '__main__':
                             x += 1
                         #--------------------------------------------------------------------------------------
                     for i in range(len(S[t])): S[t][i][3] = np.sum(D[i])/len(S[t])
-                    K[t] = select_k_paths(S[t],k_value,type='exp')
+                    K[t] = select_k_paths(S[t],k_value,ktype=k_type)
 
+                    mds_plot_path = out_dir+'person_%s.trip_%s.trans_%s.mds.png'%(person,trip,t)
+                    f = plt.figure()
+                    f.set_figwidth(12)
+                    f.set_figheight(9)
                     embedding = MDS(n_components=2,n_jobs=cpus,dissimilarity='precomputed')
                     d_trans   = embedding.fit_transform(D)
                     plt.tick_params(left=False,bottom=False,labelleft=False,labelbottom=False)
@@ -1067,9 +1089,14 @@ if __name__ == '__main__':
                                     zorder=3.0+2*(1.0-k/k_value),alpha=0.8,label='k_%s'%k)
                     plt.title('person=%s,trip=%s,trans=%s'%(person,trip,t))
                     plt.legend()
-                    plt.show()
+                    plt.savefig(mds_plot_path)
+                    plt.close()
 
+                    scatter_plot_path = out_dir+'person_%s.trip_%s.trans_%s.scatter.png'%(person,trip,t)
                     d_plot = np.array([x[2:4] for x in S[t]])
+                    f = plt.figure()
+                    f.set_figwidth(12)
+                    f.set_figheight(9)
                     plt.scatter(d_plot[:,0],d_plot[:,1],color=(0.0,0.0,0.0,0.1),label='all')
                     for k in range(k_value):
                         plt.scatter(d_plot[K[t][k][-1],0],d_plot[K[t][k][-1],1],
@@ -1079,7 +1106,8 @@ if __name__ == '__main__':
                     plt.xlabel('low to high cost')
                     plt.ylabel('low to high simularity')
                     plt.legend()
-                    plt.show()
+                    plt.savefig(scatter_plot_path)
+                    plt.close()
 
             with gzip.GzipFile(out_dir+'/%s_k%s_person%s_trip%s.pickle.gz'%(metric,k_value,person,trip),'wb') as fk:
                 pickle.dump({'K':K,'D':D},fk)
