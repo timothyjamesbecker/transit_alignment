@@ -79,18 +79,25 @@ def gtfs_stop_time_shape_dist(n_path,s_idx):
 def read_gtfs_shape(n_bas):
     return True
 
-def read_gtfs_calendar(n_base):
+def read_gtfs_calendar(n_base,merge=None):
     header,data = [],[]
     with open(glob.glob(n_base+'calendar.txt')[0],'r') as f:
         raw = [row.replace('\r','').replace('\n','') for row in f.readlines()]
     header = [f for f in raw[0].rsplit(',')]# field names=stop_id,stop_name,stop_lat,stop_lon,zone_id
     c_idx = {header[i]:i for i in range(len(header))}
     data = [row.rsplit(',') for row in raw[1:]]
-    for i in range(len(data)):
-        data[i][0] = data[i][c_idx['service_id']].split('_merged_')[0]
-        data[i][1] = datetime.datetime.strptime(data[i][c_idx['start_date']],'%Y%m%d')
-        data[i][2] = datetime.datetime.strptime(data[i][c_idx['end_date']],'%Y%m%d')
-        data[i] = [data[i][0]]+[[data[i][1],data[i][2]]]+[[bool(int(x)) for x in data[i][c_idx['monday']:]]]
+    if merge is not None:
+        for i in range(len(data)):
+            data[i][0] = data[i][c_idx['service_id']].split('_merged_')[0]
+            data[i][1] = datetime.datetime.strptime(data[i][c_idx['start_date']],'%Y%m%d')
+            data[i][2] = datetime.datetime.strptime(data[i][c_idx['end_date']],'%Y%m%d')
+            data[i] = [data[i][0]]+[[data[i][1],data[i][2]]]+[[bool(int(x)) for x in data[i][c_idx['monday']:]]]
+    else:
+        for i in range(len(data)):
+            data[i][0] = data[i][c_idx['service_id']]
+            data[i][1] = datetime.datetime.strptime(data[i][c_idx['start_date']],'%Y%m%d')
+            data[i][2] = datetime.datetime.strptime(data[i][c_idx['end_date']],'%Y%m%d')
+            data[i] = [data[i][0]]+[[data[i][1],data[i][2]]]+[[bool(int(x)) for x in data[i][c_idx['monday']:]]]
     C = {}
     for i in range(len(data)):
         if any(data[i][2]):
@@ -100,7 +107,7 @@ def read_gtfs_calendar(n_base):
             else: C[data[i][0]] = data[i]
     return C
 
-def read_gtfs_trips(n_base,merge='_merged_'):
+def read_gtfs_trips(n_base,merge=None):
     header,data = [],[]
     with open(glob.glob(n_base+'trips*.txt')[0], 'r') as f:
         raw = [row.replace('\r', '').replace('\n', '') for row in f.readlines()]
@@ -146,7 +153,8 @@ def get_service_id(calendar,search_date):
 #has time conversions inside and can aply calendar
 #needs to have calendar.txt, trips.txt and select the day Mo,Tu,We,Th,Fr,Sa,Su
 #stops = [[sid,sname,lon,lat,NN=[]],...[]]
-def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,service_id=None,search_date=None,search_time=[0,115200]):
+def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,
+                   service_id=None,search_date=None,merged=None,search_time=[0,115200]):
     if type(search_date) is str: s_id = get_service_id(calendar,search_date)
     elif service_id is not None: s_id = service_id
     if s_id is not None: #can only select one service id (weekday,sat,sun)

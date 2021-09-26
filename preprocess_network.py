@@ -207,9 +207,11 @@ if __name__ == '__main__':
     parser.add_argument('--in_path',type=str,help='GTFS input directory\t[None]')
     parser.add_argument('--out_dir',type=str,help='output directory\t[None]')
     parser.add_argument('--date',type=str,help='date to preprocess with, leave out to iterate on all\t[all from network]')
-    parser.add_argument('--walk',type=float,help='walking distance in miles to use as upper bound for access and transfers\t[0.5]')
+    parser.add_argument('--sit',type=float,help='maximum minutes to use as upper bound for access/egress and transfers\t[10.0]')
+    parser.add_argument('--walk',type=float,help='walking distance in miles to use as upper bound for access/egress and transfers\t[0.5]')
     parser.add_argument('--drive',type=float,help='driving distance in miles to use as upper bound for park and ride access,egress\t[15.0]')
     parser.add_argument('--time',type=str,help='comma seperated time range. Leave out to use all\t[0:00,32:00]')
+    parser.add_argument('--compute_lcs',action='store_true',help='skip full LCS calculations of trips\t[False]')
     parser.add_argument('--cpus',type=int,help='number of parallel cores for pairwise LCSWT\t[all]')
     # parser.add_argument('--test',action='store_true',help='')
     args = parser.parse_args()
@@ -229,14 +231,21 @@ if __name__ == '__main__':
     if args.walk is not None:
         walk_buffer = args.walk
     else: walk_buffer = 0.5
+    walk_secs = walk_buffer #(0.5 miles) 3 miles/hour = 3 miles /60*60 secs
+    walk_secs = int(round((walk_buffer/3)*(60*60)))
+    if args.sit is not None:
+        sit_secs = int(round(args.sit*60))
+    else: sit_secs = 10*60
     if args.drive is not None:
         drive_buffer = args.drive
     else: drive_buffer = 15.0
+    drive_secs = int(round((drive_buffer/3)*(60*60)))
     if args.cpus is not None:
         cpus = args.cpus
     else: cpus = mp.cpu_count()
 
     print('starting to preprocess GTFS data folder = %s'%n_base)
+    print('walk_buffer=%s, drive_buffer=%s, walk_secs=%s, sit_secs=%s'%(walk_buffer,drive_buffer,walk_secs,sit_secs))
     stops,stop_idx,s_names,s_dist = ru.read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
     v_dist         = ru.gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
     trips,trip_idx = ru.read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
@@ -251,87 +260,7 @@ if __name__ == '__main__':
         print('%s total trips for date=%s'%(len(seqs),search_date))
         seqs,graph  = ru.filter_seqs(seqs,time_window=search_time)
         print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
-        #|| lcs in cython--------------------------------------------------------------------------
-        ss,ls,seq_idx = ru.seqs_to_ndarray(seqs)
-        #globally bound mp.ctypes arrays--------------------------------------------------------------------------
-        ss_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ss.shape[0]*ss.shape[1]*ss.shape[2]),lock=False))
-        ss_array  = ss_array.reshape(ss.shape[0],ss.shape[1],ss.shape[2])
-        ss_array[:,:,:] = ss[:,:,:]
-        ss = ss_array
-        ls_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ls.shape[0]),lock=False))
-        ls_array  = ls_array.reshape(ls.shape[0])
-        ls_array[:] = ls[:]
-        ls = ls_array
-        s_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(s_dist.shape[0]*s_dist.shape[1]),lock=False))
-        s_array  = s_array.reshape(s_dist.shape[0],s_dist.shape[1])
-        s_array[:,:] = s_dist[:,:]
-        s_dist = s_array
-        l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*3,lock=False))
-        l_dist    = l_dist.reshape(len(ls),len(ls),3)
-
-        #globally bound mp.ctypes arrays--------------------------------------------------------------------------
-        xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
-        partitions,n = [],len(xys)//cpus
-        for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
-        if len(xys)%cpus>0:   partitions[-1] += xys[-1*(len(xys)%cpus):]
-        for i in range(len(partitions)):
-            temp = np.zeros((len(partitions[i]),2),dtype=np.int32)
-            temp[:] = [k for k in partitions[i]]
-            partitions[i] = temp
-        sp = {}
-        S = [[seqs[k][i][1],seqs[k][i][0],k,i,seqs[k][i][2]] for k in sorted(seqs) for i in range(len(seqs[k]))]
-        S = sorted(S,key=lambda x: (x[0],x[1]))
-        S = np.array(S,dtype=np.int32)
-        ts,x,y = {},0,0
-        for i in range(1,len(S),1):
-            y += 1
-            if S[i-1][0]<S[i][0]:
-                ts[i] = y-x
-                x = y
-        ps,x,y = [],0,0
-        for k in sorted(ts):
-            y += ts[k]
-            if y >= len(S)//cpus:
-                ps += [[x,k]]
-                x = k
-                y = 0
-        ps += [[x,len(S)]]
-        print('starting || cython trip transfers computation')
-        t_start = time.time()
-        p1 = mp.Pool(processes=cpus)
-        for i in range(len(ps)):
-            params = {'start':ps[i][0],'end':ps[i][1],'sit':600,'walk':600,'speed':3.0}
-            p1.apply_async(parallel_scan_trip_trans,args=(params,),callback=collect_results)
-        p1.close()
-        p1.join()
-        t_stop = time.time()
-        print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
-        T = {'sit':{},'walk':{}}
-        for result in result_list:
-            if len(result)>0:
-                for k in result[0]['sit']:
-                    T['sit'][k] = result[0]['sit'][k]
-                for k in result[0]['walk']:
-                    T['walk'][k] = result[0]['walk'][k]
-        result_list = []
-        #fire it up---------------------------------------------------
-        t_start = time.time()
-        print('starting || cython lcs computation')
-        p1 = mp.Pool(processes=cpus)
-        for i in range(len(partitions)):
-            p1.apply_async(parallel_lcs,args=(partitions[i],))
-        p1.close()
-        p1.join()
-        t_stop = time.time()
-        print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
-        # || lcs in cython--------------------------------------------------------------------------
-        DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
-    else:
-        for service_id in sorted(list(calendar.keys())):
-            seqs,graph  = ru.read_gtfs_seqs(n_base,stop_idx,trips,trip_idx,calendar,service_id=service_id)
-            print('%s total trips for service_id=%s %s'%(len(seqs),service_id,calendar[service_id]))
-            seqs,graph  = ru.filter_seqs(seqs,time_window=search_time)
-            print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
+        if len(seqs)>0:
             #|| lcs in cython--------------------------------------------------------------------------
             ss,ls,seq_idx = ru.seqs_to_ndarray(seqs)
             #globally bound mp.ctypes arrays--------------------------------------------------------------------------
@@ -349,20 +278,16 @@ if __name__ == '__main__':
             s_dist = s_array
             l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*3,lock=False))
             l_dist    = l_dist.reshape(len(ls),len(ls),3)
+
             #globally bound mp.ctypes arrays--------------------------------------------------------------------------
             xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
-            if len(xys)>cpus:
-                partitions,n = [],len(xys)//cpus
-                for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
-                if len(xys)%cpus>0:   partitions[-1] += xys[-1*(len(xys)%cpus):]
-                for i in range(len(partitions)):
-                    temp = np.zeros([len(partitions[i]),2],dtype=np.int32)
-                    temp[:] = [k for k in partitions[i]]
-                    partitions[i] = temp
-            else:
-                partitions = [np.zeros([len(xys),2],dtype=np.int32)]
-                for i in range(len(xys)):
-                    partitions[0][i][:] = xys[i]
+            partitions,n = [],len(xys)//cpus
+            for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
+            if len(xys)%cpus>0:   partitions[-1] += xys[-1*(len(xys)%cpus):]
+            for i in range(len(partitions)):
+                temp = np.zeros((len(partitions[i]),2),dtype=np.int32)
+                temp[:] = [k for k in partitions[i]]
+                partitions[i] = temp
             sp = {}
             S = [[seqs[k][i][1],seqs[k][i][0],k,i,seqs[k][i][2]] for k in sorted(seqs) for i in range(len(seqs[k]))]
             S = sorted(S,key=lambda x: (x[0],x[1]))
@@ -385,30 +310,118 @@ if __name__ == '__main__':
             t_start = time.time()
             p1 = mp.Pool(processes=cpus)
             for i in range(len(ps)):
-                params = {'start':ps[i][0],'end':ps[i][1],'sit':600,'walk':600,'speed':3.0}
+                params = {'start':ps[i][0],'end':ps[i][1],'sit':sit_secs,'walk':walk_secs,'speed':3.0}
                 p1.apply_async(parallel_scan_trip_trans,args=(params,),callback=collect_results)
             p1.close()
             p1.join()
             t_stop = time.time()
             print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
-            T = {}
+            T = {'sit':{},'walk':{}}
             for result in result_list:
                 if len(result)>0:
-                    for k in result[0]:
-                        T[k] = result[0][k]
+                    for k in result[0]['sit']:
+                        T['sit'][k] = result[0]['sit'][k]
+                    for k in result[0]['walk']:
+                        T['walk'][k] = result[0]['walk'][k]
             result_list = []
             #fire it up---------------------------------------------------
-            t_start = time.time()
-            print('starting || cython lcs computation')
-            p1 = mp.Pool(processes=cpus)
-            for i in range(len(partitions)):
-                p1.apply_async(parallel_lcs,args=(partitions[i],))
-            p1.close()
-            p1.join()
-            t_stop = time.time()
-            print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
+            if args.compute_lcs:
+                t_start = time.time()
+                print('starting || cython lcs computation')
+                p1 = mp.Pool(processes=cpus)
+                for i in range(len(partitions)):
+                    p1.apply_async(parallel_lcs,args=(partitions[i],))
+                p1.close()
+                p1.join()
+                t_stop = time.time()
+                print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
             # || lcs in cython--------------------------------------------------------------------------
             DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
+    else:
+        for service_id in sorted(list(calendar.keys())):
+            seqs,graph  = ru.read_gtfs_seqs(n_base,stop_idx,trips,trip_idx,calendar,service_id=service_id)
+            print('%s total trips for service_id=%s %s'%(len(seqs),service_id,calendar[service_id]))
+            seqs,graph  = ru.filter_seqs(seqs,time_window=search_time)
+            print('%s total trips left after filtering using time_window=%s'%(len(seqs),search_time))
+            if len(seqs)>0:
+                #|| lcs in cython--------------------------------------------------------------------------
+                ss,ls,seq_idx = ru.seqs_to_ndarray(seqs)
+                #globally bound mp.ctypes arrays--------------------------------------------------------------------------
+                ss_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ss.shape[0]*ss.shape[1]*ss.shape[2]),lock=False))
+                ss_array  = ss_array.reshape(ss.shape[0],ss.shape[1],ss.shape[2])
+                ss_array[:,:,:] = ss[:,:,:]
+                ss = ss_array
+                ls_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_int,(ls.shape[0]),lock=False))
+                ls_array  = ls_array.reshape(ls.shape[0])
+                ls_array[:] = ls[:]
+                ls = ls_array
+                s_array  = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(s_dist.shape[0]*s_dist.shape[1]),lock=False))
+                s_array  = s_array.reshape(s_dist.shape[0],s_dist.shape[1])
+                s_array[:,:] = s_dist[:,:]
+                s_dist = s_array
+                l_dist    = np.ctypeslib.as_array(mp.Array(ctypes.c_float,(len(ls)**2)*3,lock=False))
+                l_dist    = l_dist.reshape(len(ls),len(ls),3)
+                #globally bound mp.ctypes arrays--------------------------------------------------------------------------
+                xys = sorted([[x,y] for x,y in it.combinations(range(len(ls)),2)])
+                if len(xys)>cpus:
+                    partitions,n = [],len(xys)//cpus
+                    for i in range(cpus): partitions     += [xys[i*n:(i+1)*n]]
+                    if len(xys)%cpus>0:   partitions[-1] += xys[-1*(len(xys)%cpus):]
+                    for i in range(len(partitions)):
+                        temp = np.zeros([len(partitions[i]),2],dtype=np.int32)
+                        temp[:] = [k for k in partitions[i]]
+                        partitions[i] = temp
+                else:
+                    partitions = [np.zeros([len(xys),2],dtype=np.int32)]
+                    for i in range(len(xys)):
+                        partitions[0][i][:] = xys[i]
+                sp = {}
+                S = [[seqs[k][i][1],seqs[k][i][0],k,i,seqs[k][i][2]] for k in sorted(seqs) for i in range(len(seqs[k]))]
+                S = sorted(S,key=lambda x: (x[0],x[1]))
+                S = np.array(S,dtype=np.int32)
+                ts,x,y = {},0,0
+                for i in range(1,len(S),1):
+                    y += 1
+                    if S[i-1][0]<S[i][0]:
+                        ts[i] = y-x
+                        x = y
+                ps,x,y = [],0,0
+                for k in sorted(ts):
+                    y += ts[k]
+                    if y >= len(S)//cpus:
+                        ps += [[x,k]]
+                        x = k
+                        y = 0
+                ps += [[x,len(S)]]
+                print('starting || cython trip transfers computation')
+                t_start = time.time()
+                p1 = mp.Pool(processes=cpus)
+                for i in range(len(ps)):
+                    params = {'start':ps[i][0],'end':ps[i][1],'sit':sit_secs,'walk':walk_secs,'speed':3.0}
+                    p1.apply_async(parallel_scan_trip_trans,args=(params,),callback=collect_results)
+                p1.close()
+                p1.join()
+                t_stop = time.time()
+                print('ending || cython trip transfer computation in %s sec'%round(t_stop-t_start,2))
+                T = {}
+                for result in result_list:
+                    if len(result)>0:
+                        for k in result[0]:
+                            T[k] = result[0][k]
+                result_list = []
+                #fire it up---------------------------------------------------
+                if args.compute_lcs:
+                    t_start = time.time()
+                    print('starting || cython lcs computation')
+                    p1 = mp.Pool(processes=cpus)
+                    for i in range(len(partitions)):
+                        p1.apply_async(parallel_lcs,args=(partitions[i],))
+                    p1.close()
+                    p1.join()
+                    t_stop = time.time()
+                    print('ending || cython lcs computation in %s sec'%round(t_stop-t_start,2))
+                # || lcs in cython--------------------------------------------------------------------------
+                DATA['service_id_%s'%service_id] = {'seqs':seqs,'graph':graph,'l_dist':l_dist,'l_idx':seq_idx,'trans':T}
     print('saving network data structures to disk (distance matrices, sequences and graph)')
     with gzip.GzipFile(out_dir+'/network.pickle.gz','wb') as f:
         pickle.dump(DATA,f)

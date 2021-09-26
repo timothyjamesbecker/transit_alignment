@@ -87,7 +87,7 @@ def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want
     return ps
 
 #will load cached data or if not present, generate it
-def load_network_data(n_base,walk=0.5,search_time=[0,115200],search_date=None,target_cpus=None):
+def load_network_data(n_base,walk=0.5,sit=10,search_time=[0,115200],search_date=None,target_cpus=None):
     if os.path.exists(n_base+'/network.pickle.gz'):
         print('trying to load the network data...')
         with gzip.GzipFile(glob.glob(n_base+'/network*pickle.gz')[0],'rb') as f:
@@ -95,7 +95,7 @@ def load_network_data(n_base,walk=0.5,search_time=[0,115200],search_date=None,ta
     else:
         print('preprocessing the network..')
         command = ['python3',os.path.dirname(__file__)+'/preprocess_network.py','--in_path',n_base,
-                   '--out_dir',n_base,'--walk %s'%walk,
+                   '--out_dir',n_base,'--walk %s'%walk,'--sit %s'%sit,
                    '--time %s,%s'%(search_time[0],search_time[1])]
         if search_date is not None:  command += ['--date',search_date]
         if target_cpus is not None: command += ['--cpus',str(target_cpus)]
@@ -263,6 +263,7 @@ def start_od_search(person_trip,w_dist,p_dist,s_dist,v_dist,buff_time=10.0,max_t
                   (o_taz,d_taz,service_id,len(candidate_trips)))
 
         if heading_limit: #filter those trips that are in the opposite direction at walking speed or faster!
+            i = 0
             for i in range(len(candidate_trips)):
                 if candidate_trips[i][4]<-1*walk_speed: break
             j = i
@@ -563,7 +564,7 @@ def collect_results(result):
     result_list.append(result)
 
 #out_dir,partitions[i],penalties,max_trans,trans_prop,heading_limit
-def get_seq_paths(out_path,C,D,penalties,max_trans=5,trans_p=[1.0,0.75,0.5,0.25,0.125],min_rate=-3.0):
+def get_seq_paths(out_path,C,D,penalties,max_trans=3,trans_p=[1.0,0.75,0.5,0.25,0.125],min_rate=-3.0):
     X = {'error':[]}
     for i in range(len(C)):
         try:
@@ -753,16 +754,16 @@ def human_short_path(X,person,trip,persons,trips,s_names,verbose=True):
 def path_to_human(person,trip,k,path,s_names):
     H = []
     for row in path:
-        if row[0]==-1:   tid = 'waiting'
-        elif row[0]==-2: tid = 'walking'
-        elif row[0]==-3: tid = 'driving'
-        else:            tid = trips[row[0]][1]
+        if row[0]==-1:   headsign,tid = 'waiting',-1
+        elif row[0]==-2: headsign,tid = 'walking',-2
+        elif row[0]==-3: headsign,tid = 'driving',-3
+        else:            headsign,tid = trips[row[0]][1],int(trips[row[0]][-1])
         stop_name = s_names[stops[row[2]][0]]
         h,m,s  = row[3]//(60*60),(row[3]%(60*60))//60,((row[3]%(60*60))%60)%60
         s_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
         h,m,s  = row[4]//(60*60),(row[4]%(60*60))//60,((row[4]%(60*60))%60)%60
         p_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
-        H += [[person,trip,k,tid,row[1],stop_name,s_time,p_time]]
+        H += [[person,trip,k,headsign,tid,row[1],stop_name,s_time,p_time]]
     return H
 
 def get_human_paths(X,persons,s_names,abbreviate=False): #k=0 => best path
@@ -792,12 +793,12 @@ def get_human_paths(X,persons,s_names,abbreviate=False): #k=0 => best path
     return H
 
 def write_human_paths_tsv(path,H):
-    s = '\t'.join(['person','trip','k','trip_sign','t_idx','stop_name','stop_time','penalty_time'])+'\n'
+    s = '\t'.join(['person','trip','k','head_sign','tid','t_idx','stop_name','stop_time','penalty_time'])+'\n'
     for i in sorted(H):
         for j in sorted(H[i]):
             for n in range(len(H[i][j])):
                 s += '\t'.join([str(i),str(j),str(H[i][j][n][2]),'"%s"'%H[i][j][n][3],str(H[i][j][n][4]),
-                                '"%s"'%H[i][j][n][5],H[i][j][n][6],str(H[i][j][n][7])])+'\n'
+                                '"%s"'%H[i][j][n][5],H[i][j][n][6],str(H[i][j][n][7]),str(H[i][j][n][8])])+'\n'
     with open(path,'w') as f:
         f.write(s)
         return True
@@ -874,7 +875,7 @@ if __name__ == '__main__':
     else:
         max_trans = 3
     if args.trans_prop is not None:
-        trans_prop = [float(x) for x in args.tras_prop.rsplit(',')]
+        trans_prop = [float(x) for x in args.trans_prop.rsplit(',')]
     else:
         trans_prop = [1.0,0.5,0.25,0.125,0.0625] #divid by 2 per transfer leave in the search tree
     if args.heading_limit is not None:
@@ -926,7 +927,7 @@ if __name__ == '__main__':
             C[i] = {}
             for j in range(len(persons[i])):
                 C[i][j] = can = start_od_search(persons[i][j],w_dist,p_dist,s_dist,v_dist,
-                                                buff_time=buff_time,max_time=max_time,walk_speed=walk_speed,
+                                                buff_time=od_walk_time,max_time=max_time,walk_speed=walk_speed,
                                                 bus_speed=bus_speed,drive_speed=drive_speed)
                 if can is not None and len(can[sorted(can)[0]])>0:
                     print('person=%s,trip=%s was valid on %s, will run RST...'%(i,j,persons[i][j][2].strftime('%m/%d/%Y')))
@@ -975,11 +976,11 @@ if __name__ == '__main__':
             trip     = int(path.rsplit('/')[-1].rsplit('.')[1].rsplit('trip_')[-1])
             print('working on person=%s, trip=%s'%(person,trip))
             with gzip.GzipFile(path,'rb') as fr:
-                D = pickle.load(fr)
-                person     = D['person']
-                trip       = D['trip']
-                service_id = D['service_id']
-                X          = D['paths']
+                DS = pickle.load(fr)
+                person     = DS['person']
+                trip       = DS['trip']
+                service_id = DS['service_id']
+                X          = DS['paths']
             print('loaded prexisting RST search data for person=%s, trip=%s and service_id=%s'%(person,trip,service_id))
             S = {}
             for t in X:
