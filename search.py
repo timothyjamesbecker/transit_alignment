@@ -87,7 +87,7 @@ def read_person_trip_list(path,delim=',',quoting='"'): #more open since may want
     return ps
 
 #will load cached data or if not present, generate it
-def load_network_data(n_base,walk=0.5,sit=10,search_time=[0,115200],search_date=None,target_cpus=None):
+def load_network_data(n_base,walk=0.5,sit=10,search_time=[0,115200],search_date=None,target_cpus=None,pre_compute_lcs=None):
     if os.path.exists(n_base+'/network.pickle.gz'):
         print('trying to load the network data...')
         with gzip.GzipFile(glob.glob(n_base+'/network*pickle.gz')[0],'rb') as f:
@@ -99,6 +99,7 @@ def load_network_data(n_base,walk=0.5,sit=10,search_time=[0,115200],search_date=
                    '--time %s,%s'%(search_time[0],search_time[1])]
         if search_date is not None:  command += ['--date',search_date]
         if target_cpus is not None: command += ['--cpus',str(target_cpus)]
+        if pre_compute_lcs is not None: command += ['--compute_lcs']
         print('starting network preprocessing, please stand by for params:%s'%command)
         try:
             t_start = time.time()
@@ -828,6 +829,7 @@ if __name__ == '__main__':
     parser.add_argument('--k_value',type=int,help='the maximum number of paths to calculate per transfer\t[5]')
     parser.add_argument('--k_type', type=str, help='k value mixing wieght function:xy,log,...\t[xy]')
     parser.add_argument('--jaccard',action='store_true',help='use the simple jaccard stop set metric instead of LCSWT\t[False]')
+    parser.add_argument('--pre_compute_lcs',action='store_true',help='do not skip full LCS pre-calculations of trips\t[False]')
     parser.add_argument('--abbreviate',action='store_true',help='abbreviate the final paths so only include tranfer points\t[False]')
     parser.add_argument('--cpus',type=int,help='number of cpus to use\t[1]')
     args = parser.parse_args()
@@ -912,7 +914,8 @@ if __name__ == '__main__':
         penalties['offset'][t] = pen[t][1]
     print('using penalty weighting values=%s'%penalties)
 
-    D = load_network_data(n_base,walk=((walk_speed/60.0)*buff_time),search_time=search_time,target_cpus=cpus) #can run preproccess_network.py
+    D = load_network_data(n_base,walk=((walk_speed/60.0)*buff_time),search_time=search_time,
+                          target_cpus=cpus,pre_compute_lcs=args.pre_compute_lcs) #can run preproccess_network.py
 
     persons = read_person_trip_list(d_path)
     stops,s_idx,s_names,s_dist,w_dist,p_dist = D['stops'],D['stop_idx'],D['s_names'],D['s_dist'],D['w_dist'],D['p_dist']
