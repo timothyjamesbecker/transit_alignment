@@ -154,7 +154,7 @@ def get_service_id(calendar,search_date):
 #needs to have calendar.txt, trips.txt and select the day Mo,Tu,We,Th,Fr,Sa,Su
 #stops = [[sid,sname,lon,lat,NN=[]],...[]]
 def read_gtfs_seqs(n_base,s_idx,trips,t_idx,calendar,
-                   service_id=None,search_date=None,merged=None,search_time=[0,115200]):
+                   service_id=None,search_date=None,search_time=[0,115200]):
     if type(search_date) is str: s_id = get_service_id(calendar,search_date)
     elif service_id is not None: s_id = service_id
     if s_id is not None: #can only select one service id (weekday,sat,sun)

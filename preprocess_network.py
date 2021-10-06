@@ -248,10 +248,10 @@ if __name__ == '__main__':
     print('walk_buffer=%s, drive_buffer=%s, walk_secs=%s, sit_secs=%s'%(walk_buffer,drive_buffer,walk_secs,sit_secs))
     stops,stop_idx,s_names,s_dist = ru.read_gtfs_stops(n_base,max_miles=walk_buffer) #{enum_stop_id:[stop_id,stop_name,x,y,[NN<=10.0]], ... }
     v_dist         = ru.gtfs_stop_time_shape_dist(n_base,stop_idx) #in vehicle distances
-    trips,trip_idx = ru.read_gtfs_trips(n_base) #trips=[trip_id,trip_name,route_id,service_id,direction]
+    trips,trip_idx = ru.read_gtfs_trips(n_base,merge=None) #trips=[trip_id,trip_name,route_id,service_id,direction]
     w_dist         = ru.read_walk_access(n_base,stop_idx,walk_buff=walk_buffer)
     p_dist         = ru.read_park_and_ride(n_base,stop_idx,drive_buff=drive_buffer)
-    calendar       = ru.read_gtfs_calendar(n_base) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
+    calendar       = ru.read_gtfs_calendar(n_base,merge=None) #{service_id,[start,end],[mon,tue,wed,thu,fri,sat,sun])
     DATA = {'stops':stops,'s_names':s_names,'stop_idx':stop_idx,'s_dist':s_dist,'w_dist':w_dist,'p_dist':p_dist,
             'trips':trips,'trip_idx':trip_idx,'v_dist':v_dist,'calendar':calendar}
     if search_date is not None and type(search_date) is str:

@@ -755,6 +755,7 @@ def human_short_path(X,person,trip,persons,trips,s_names,verbose=True):
 def path_to_human(person,trip,k,path,s_names):
     H = []
     for row in path:
+        t_idx = row[1]
         if row[0]==-1:   headsign,tid = 'waiting',-1
         elif row[0]==-2: headsign,tid = 'walking',-2
         elif row[0]==-3: headsign,tid = 'driving',-3
@@ -764,7 +765,7 @@ def path_to_human(person,trip,k,path,s_names):
         s_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
         h,m,s  = row[4]//(60*60),(row[4]%(60*60))//60,((row[4]%(60*60))%60)%60
         p_time = '%s:%s:%s'%(str(h).zfill(2),str(m).zfill(2),str(s).zfill(2))
-        H += [[person,trip,k,headsign,tid,row[1],stop_name,s_time,p_time]]
+        H += [[person,trip,k,headsign,tid,t_idx,stop_name,s_time,p_time]]
     return H
 
 def get_human_paths(X,persons,s_names,abbreviate=False): #k=0 => best path
@@ -1139,6 +1140,7 @@ if __name__ == '__main__':
                 if person not in X: X[person] = {}
                 if trip not in X[person]: X[person][trip] = {}
                 X[person][trip] = pickle.load(fk)
+
     H = get_human_paths(X,persons,s_names,abbreviate=args.abbreviate)
     if args.abbreviate:
         print('converted all k-paths, writing file to disk:%s'%(out_dir+'/%s_k%s_human_results_abbr.tsv'%(metric,k_value)))
